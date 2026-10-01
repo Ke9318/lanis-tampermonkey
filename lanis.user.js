@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.120-stable
+// @version      1.16.121-stable
 // @description  성장 기능은 현재 게임 탭에서 사용자가 하나씩 직접 호출하고, 전투/일일 기능과 실행 권한을 분리한 통합 패널.
 // @match        https://lanis.me/*
 // @noframes
@@ -13,7 +13,7 @@
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 // Compatibility artifact only. Production update authority is Operator/Bridge local approved releases.
 
-// Ranis Shared Core 1.3.116
+// Ranis Shared Core 1.3.117
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 (function (global) {
   'use strict';
@@ -21,13 +21,13 @@
   global.__lanisSharedCoreBootstrap = function (options = {}) {
     if (global.__lanisSharedCoreAdapter) {
       if (options.mode !== 'headless') {
-        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.116' });
+        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.117' });
         global.__mountLanisUnifiedPanel?.();
         global.__mountLanisBossTool?.();
       }
       return global.__lanisSharedCoreAdapter;
     }
-    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.116' });
+    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.117' });
 (function () {
   'use strict';
 
@@ -9165,6 +9165,8 @@
     config: {
       targetScore: 5000,
       tierIndex: 3,
+      mineFloor: null,
+      wallSection: '하층',
       maxRejobCount: 500,
       clickDelay: [500, 1300],
       useHiddenRoomMap: false,
@@ -9182,6 +9184,7 @@
     { short: '탑' },
     { short: '지하' },
     { short: '광산' },
+    { short: '성벽' },
   ];
 
   Modules.rejob.clickDelayWait = function () {
@@ -9325,20 +9328,66 @@
     return true;
   };
 
+  Modules.rejob.findHuntButton = function (tier, mineFloor = null, wallSection = this.config.wallSection) {
+    if (mineFloor !== null && (!Number.isInteger(mineFloor) || mineFloor < 1 || mineFloor > 5)) return null;
+    if (tier.short === '성벽' && !['하층', '중층', '상층'].includes(wallSection)) return null;
+    const suffix = tier.short === '광산' ? '(?:\\s*[1-5]층)?' :
+      tier.short === '성벽' ? '\\s*(?:하층|중층|상층)' : '';
+    const exact = new RegExp(`^${tier.short}${suffix}\\s*[×xX]\\s*50$`);
+    const candidates = [...document.querySelectorAll('button')].filter((button) => {
+      const text = button.textContent.trim();
+      if (!exact.test(text)) return false;
+      if (tier.short === '성벽') return text === `성벽 ${wallSection} × 50` ||
+        new RegExp(`^성벽\\s*${wallSection}\\s*[×xX]\\s*50$`).test(text);
+      return tier.short !== '광산' || mineFloor === null ||
+        new RegExp(`^광산\\s*${mineFloor}층\\s*[×xX]\\s*50$`).test(text);
+    });
+    return candidates.length === 1 ? candidates[0] : null;
+  };
+
+  Modules.rejob.ensureHuntGround = async function (tier, mineFloor = null, wallSection = this.config.wallSection) {
+    await Core.clickNavMenuSuffix('전투', tier.short);
+    await Core.waitFor(() => Core.bodyText().includes(tier.short));
+    if (tier.short === '광산' && mineFloor !== null) {
+      const floorButton = await Core.retryStep(`${mineFloor}층 버튼 찾기`, () =>
+        [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === `${mineFloor}층`) || null
+      );
+      if (!floorButton) return null;
+      if (floorButton.getAttribute('aria-pressed') !== 'true') {
+        floorButton.click();
+        await this.clickDelayWait();
+      }
+    }
+    if (tier.short === '성벽') {
+      if (!['하층', '중층', '상층'].includes(wallSection)) return null;
+      const sectionButton = await Core.retryStep(`${wallSection} 버튼 찾기`, () =>
+        [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === wallSection) || null
+      );
+      if (!sectionButton) return null;
+      if (sectionButton.getAttribute('aria-pressed') !== 'true') {
+        sectionButton.click();
+        await this.clickDelayWait();
+      }
+      const selected = await Core.retryStep(`${wallSection} 선택 확인`, () =>
+        [...document.querySelectorAll('button')].find((button) =>
+          button.textContent.trim() === wallSection && button.getAttribute('aria-pressed') === 'true') || null
+      );
+      if (!selected) return null;
+    }
+    return Core.retryStep(`"${tier.short} × 50" 버튼 찾기`, () => this.findHuntButton(tier, mineFloor, wallSection));
+  };
+
   Modules.rejob.doHunt = async function () {
     const mod = this;
     const useOverride = mod.nextTierIndexOverride !== null;
     const tier = useOverride ? mod.TIERS[mod.nextTierIndexOverride] : mod.TIERS[mod.config.tierIndex];
+    const mineFloor = tier.short === '광산' && Number.isInteger(mod.config.mineFloor) && mod.config.mineFloor >= 1 && mod.config.mineFloor <= 5
+      ? mod.config.mineFloor : null;
+    const wallSection = tier.short === '성벽' ? mod.config.wallSection : null;
     mod.nextTierIndexOverride = null;
 
     Core.log('rejob', `전투 → ...${tier.short} 이동`);
-    await Core.clickNavMenuSuffix('전투', tier.short);
-    await Core.waitFor(() => Core.bodyText().includes(`${tier.short} × 50`) || Core.bodyText().includes(tier.short));
-
-    const huntBtn = await Core.retryStep(`"${tier.short} × 50" 버튼 찾기`, () =>
-      [...document.querySelectorAll('button')].find((b) => new RegExp(`^${tier.short}\\s*[×xX]\\s*50$`).test(b.textContent.trim())) ||
-      null
-    );
+    const huntBtn = await mod.ensureHuntGround(tier, mineFloor, wallSection);
     if (!huntBtn) {
       Core.notifyStopped('rejob', `"${tier.short} × 50" 버튼을 찾지 못했습니다 (여러 번 재시도 후에도 실패).`);
       return null;
@@ -9360,9 +9409,7 @@
     while (Core.bodyText().includes('장비 내구도 부족') && repairAttempts < 3) {
       await Core.repairAllEquipment('rejob');
       repairAttempts += 1;
-      const huntBtnAgain = await Core.waitFor(() =>
-        [...document.querySelectorAll('button')].find((b) => new RegExp(`^${tier.short}\\s*[×xX]\\s*50$`).test(b.textContent.trim()))
-      );
+      const huntBtnAgain = await mod.ensureHuntGround(tier, mineFloor, wallSection);
       if (!huntBtnAgain) break;
       huntBtnAgain.click();
       await mod.clickDelayWait();
@@ -9690,7 +9737,7 @@
   };
 
 
-  const REJOB_PERSIST_KEYS = ['targetScore', 'tierIndex', 'maxRejobCount', 'useHiddenRoomMap'];
+  const REJOB_PERSIST_KEYS = ['targetScore', 'tierIndex', 'mineFloor', 'wallSection', 'maxRejobCount', 'useHiddenRoomMap'];
 
   function buildRejobTab(container) {
     const mod = Modules.rejob;
@@ -9725,9 +9772,11 @@
     });
     container.appendChild(scoreInput);
 
-    container.appendChild(labelEl('사냥터'));
+    const groundRow = document.createElement('div');
+    groundRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+    groundRow.appendChild(labelEl('사냥터'));
     const tierSelect = document.createElement('select');
-    tierSelect.style.cssText = inputStyle();
+    tierSelect.style.cssText = `${inputStyle()} flex:1; min-width:0;`;
     mod.TIERS.forEach((t, i) => {
       const o = document.createElement('option');
       o.value = i;
@@ -9735,11 +9784,51 @@
       if (i === mod.config.tierIndex) o.selected = true;
       tierSelect.appendChild(o);
     });
+    groundRow.appendChild(tierSelect);
+    const detailSelect = document.createElement('select');
+    detailSelect.style.cssText = `${inputStyle()} width:76px; flex:none;`;
+    function syncDetailVisibility() {
+      const isMine = tierSelect.value === '5';
+      const isWall = tierSelect.value === '6';
+      detailSelect.style.display = isMine || isWall ? 'block' : 'none';
+      detailSelect.replaceChildren();
+      if (isMine) {
+        const currentFloor = Number(mod.config.mineFloor);
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = '현재 층';
+        placeholder.selected = !Number.isInteger(currentFloor) || currentFloor < 1 || currentFloor > 5;
+        detailSelect.appendChild(placeholder);
+        [1, 2, 3, 4, 5].forEach((floor) => {
+          const option = document.createElement('option');
+          option.value = String(floor);
+          option.textContent = `${floor}층`;
+          option.selected = currentFloor === floor;
+          detailSelect.appendChild(option);
+        });
+      } else if (isWall) {
+        ['하층', '중층', '상층'].forEach((section) => {
+          const option = document.createElement('option');
+          option.value = section;
+          option.textContent = section;
+          option.selected = section === mod.config.wallSection;
+          detailSelect.appendChild(option);
+        });
+      }
+    }
     tierSelect.addEventListener('change', (e) => {
       mod.config.tierIndex = parseInt(e.target.value, 10);
+      syncDetailVisibility();
       Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
     });
-    container.appendChild(tierSelect);
+    detailSelect.addEventListener('change', (e) => {
+      if (tierSelect.value === '5') mod.config.mineFloor = e.target.value === '' ? null : Number(e.target.value);
+      if (tierSelect.value === '6') mod.config.wallSection = e.target.value;
+      Core.saveModuleConfig('rejob', REJOB_PERSIST_KEYS);
+    });
+    groundRow.appendChild(detailSelect);
+    container.appendChild(groundRow);
+    syncDetailVisibility();
 
     container.appendChild(labelEl(`최대 재전직 횟수 (1~${REJOB_MAX_PER_RUN})`));
     const maxInput = document.createElement('input');
@@ -9809,7 +9898,7 @@
     refs.stopBtn = stopBtn;
     refs.statusEl = statusEl;
     refs.safetyCheck = safetyCheck;
-    refs.inputs = [scoreInput, tierSelect, maxInput, hiddenRoomCheck, safetyCheck];
+    refs.inputs = [scoreInput, tierSelect, detailSelect, maxInput, hiddenRoomCheck, safetyCheck];
     Core.updateModuleButtons();
   }
 
@@ -9828,6 +9917,7 @@
       originalElement: '',
       groundSuffix: '광산',
       floor: null,
+      wallSection: '하층',
       goldThreshold: 1000000,
       minEnergy: 100,
       ignoreProtectionOff: false,
@@ -9844,6 +9934,7 @@
     { label: '탑', suffix: '탑', hasFloor: false },
     { label: '지하', suffix: '지하', hasFloor: false },
     { label: '광산', suffix: '광산', hasFloor: true },
+    { label: '성벽', suffix: '성벽', hasFloor: false, hasSection: true },
   ];
 
   Modules.autohunt.leafTextEls = function () {
@@ -9884,10 +9975,11 @@
         ? this.findSingleBattleButton(groundSuffix)
         : this.findHuntX50Button(groundSuffix);
     if (findBtn()) {
-      if (floor) {
+      if (groundSuffix === '광산' && floor) {
         const floorSelected = await this.selectFloor(floor, shouldCancel);
         if (!floorSelected) return false;
       }
+      if (groundSuffix === '성벽' && !(await this.selectWallSection(this.config.wallSection, shouldCancel))) return false;
       return !!findBtn();
     }
     try {
@@ -9901,16 +9993,35 @@
     }
     await Core.sleep(300);
     if (shouldCancel && shouldCancel()) return false;
-    if (floor) {
+    if (groundSuffix === '광산' && floor) {
       const floorSelected = await this.selectFloor(floor, shouldCancel);
       if (!floorSelected) return false;
     }
+    if (groundSuffix === '성벽' && !(await this.selectWallSection(this.config.wallSection, shouldCancel))) return false;
     return !!(await Core.waitFor(
       () => findBtn(),
       8000,
       300,
       shouldCancel
     ));
+  };
+
+  Modules.autohunt.selectWallSection = async function (
+    section,
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    if (!['하층', '중층', '상층'].includes(section)) return false;
+    const findSection = () => Core.allButtons().find((button) => button.textContent.trim() === section) || null;
+    const button = await Core.waitFor(findSection, 6000, 300, shouldCancel);
+    if (!button) return false;
+    if (button.getAttribute('aria-pressed') !== 'true') {
+      if (!(await Core.safeClick(findSection, { beforeMin: 350, beforeMax: 700, shouldCancel }))) return false;
+      await Core.sleep(500);
+    }
+    return !!(await Core.waitFor(() => {
+      const selected = findSection();
+      return selected?.getAttribute('aria-pressed') === 'true' ? selected : null;
+    }, 6000, 300, shouldCancel));
   };
 
   Modules.autohunt.selectFloor = async function (
@@ -9939,18 +10050,20 @@
   };
 
   Modules.autohunt.findHuntX50Button = function (groundSuffix = this.config.groundSuffix) {
-    return (
-      Core.allButtons().find((b) => {
-        const text = b.textContent.trim();
-        if (!/[×xX]\s*50\s*$/.test(text)) return false;
-        if (!groundSuffix || text.includes(groundSuffix)) return true;
-        let parent = b.parentElement;
-        for (let depth = 0; parent && depth < 4; depth++, parent = parent.parentElement) {
-          if ((parent.textContent || '').includes(groundSuffix)) return true;
-        }
-        return false;
-      }) || null
-    );
+    const section = this.config.wallSection;
+    if (groundSuffix === '성벽' && !['하층', '중층', '상층'].includes(section)) return null;
+    const candidates = Core.allButtons().filter((button) => {
+      const text = button.textContent.trim();
+      if (groundSuffix === '성벽') return new RegExp(`^성벽\\s*${section}\\s*[×xX]\\s*50$`).test(text);
+      if (groundSuffix === '광산') {
+        const floor = this.config.floor;
+        return floor
+          ? new RegExp(`^광산\\s*${floor}층\\s*[×xX]\\s*50$`).test(text)
+          : /^광산(?:\s*[1-5]층)?\s*[×xX]\s*50$/.test(text);
+      }
+      return new RegExp(`^${groundSuffix}\\s*[×xX]\\s*50$`).test(text);
+    });
+    return candidates.length === 1 ? candidates[0] : null;
   };
 
   Modules.autohunt.clickHuntX50 = async function () {
@@ -9971,9 +10084,9 @@
   // ⚠ x50 유료 기능이 없는 캐릭터는 사냥터 버튼에 "50" 접미사 없이 사냥터
   // 이름만 뜬다(예: "숲"). 그 버튼 하나만 누르면 매번 단 한 번의 전투만 진행된다.
   Modules.autohunt.findSingleBattleButton = function (groundSuffix = this.config.groundSuffix) {
-    return (
-      Core.allButtons().find((b) => b.textContent.trim() === groundSuffix) || null
-    );
+    const target = groundSuffix === '성벽' ? `성벽 ${this.config.wallSection}` : groundSuffix;
+    if (groundSuffix === '성벽' && !['하층', '중층', '상층'].includes(this.config.wallSection)) return null;
+    return Core.allButtons().find((button) => button.textContent.trim() === target) || null;
   };
 
   Modules.autohunt.clickSingleBattle = async function () {
@@ -10290,7 +10403,7 @@
       return { ok: false, verified: false, code: 'QUEST_BATTLE_AUTOHUNT_CONFIG_MISSING', batches };
     }
 
-    Core.log('autohunt', `숙제 보충 시작: 기존 사냥 설정 ${mod.config.groundSuffix}${mod.config.floor ? ` ${mod.config.floor}층` : ''}, x50 ${batches}회 필요`);
+    Core.log('autohunt', `숙제 보충 시작: 기존 사냥 설정 ${mod.config.groundSuffix}${mod.config.groundSuffix === '성벽' ? ` ${mod.config.wallSection}` : mod.config.groundSuffix === '광산' && mod.config.floor ? ` ${mod.config.floor}층` : ''}, x50 ${batches}회 필요`);
     await Core.applyCommonPreset('사냥', 'autohunt');
     if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED' };
     await Core.ensureCharacterElement(mod.config.originalElement, 'autohunt');
@@ -10797,7 +10910,7 @@
     await Core.ensureCurrentTownForElement(mod.config.originalElement, 'autohunt');
     Core.log(
       'autohunt',
-      `매크로 시작: 사냥터=${mod.config.groundSuffix}${mod.config.floor ? ' ' + mod.config.floor + '층' : ''}, 입금 기준=${mod.config.goldThreshold.toLocaleString()}G, 최소 행동력=${mod.config.minEnergy}`
+      `매크로 시작: 사냥터=${mod.config.groundSuffix}${mod.config.groundSuffix === '성벽' ? ' ' + mod.config.wallSection : mod.config.groundSuffix === '광산' && mod.config.floor ? ' ' + mod.config.floor + '층' : ''}, 입금 기준=${mod.config.goldThreshold.toLocaleString()}G, 최소 행동력=${mod.config.minEnergy}`
     );
 
     let consecutiveFailures = 0;
@@ -10956,7 +11069,7 @@
   };
 
 
-  const AUTOHUNT_PERSIST_KEYS = ['originalElement', 'groundSuffix', 'floor', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff', 'singleBattleMode'];
+  const AUTOHUNT_PERSIST_KEYS = ['originalElement', 'groundSuffix', 'floor', 'wallSection', 'goldThreshold', 'minEnergy', 'ignoreProtectionOff', 'singleBattleMode'];
 
   function buildAutohuntTab(container) {
     const mod = Modules.autohunt;
@@ -10984,9 +11097,11 @@
     });
     container.appendChild(elementSelect);
 
-    container.appendChild(labelEl('사냥터'));
+    const groundRow = document.createElement('div');
+    groundRow.style.cssText = 'display:flex; align-items:center; gap:6px; margin:4px 0;';
+    groundRow.appendChild(labelEl('사냥터'));
     const groundSelect = document.createElement('select');
-    groundSelect.style.cssText = inputStyle();
+    groundSelect.style.cssText = `${inputStyle()} flex:1; min-width:0;`;
     mod.GROUND_OPTIONS.forEach((opt) => {
       const o = document.createElement('option');
       o.value = opt.suffix;
@@ -10994,29 +11109,39 @@
       if (opt.suffix === mod.config.groundSuffix) o.selected = true;
       groundSelect.appendChild(o);
     });
-    container.appendChild(groundSelect);
+    groundRow.appendChild(groundSelect);
 
-    const floorRow = document.createElement('div');
-    floorRow.appendChild(labelEl('층 (광산)'));
     const floorSelect = document.createElement('select');
-    floorSelect.style.cssText = inputStyle();
-    [1, 2, 3, 4, 5].forEach((n) => {
-      const o = document.createElement('option');
-      o.value = n;
-      o.textContent = `${n}층`;
-      if (mod.config.floor === n) o.selected = true;
-      floorSelect.appendChild(o);
-    });
+    floorSelect.style.cssText = `${inputStyle()} width:76px; flex:none;`;
     floorSelect.addEventListener('change', (e) => {
-      mod.config.floor = Number(e.target.value);
+      if (groundSelect.value === '광산') mod.config.floor = Number(e.target.value);
+      if (groundSelect.value === '성벽') mod.config.wallSection = e.target.value;
       Core.saveModuleConfig('autohunt', AUTOHUNT_PERSIST_KEYS);
     });
-    floorRow.appendChild(floorSelect);
-    container.appendChild(floorRow);
+    groundRow.appendChild(floorSelect);
+    container.appendChild(groundRow);
 
     function syncFloorVisibility() {
       const opt = mod.GROUND_OPTIONS.find((o) => o.suffix === groundSelect.value);
-      floorRow.style.display = opt && opt.hasFloor ? 'block' : 'none';
+      floorSelect.style.display = opt && (opt.hasFloor || opt.hasSection) ? 'block' : 'none';
+      floorSelect.replaceChildren();
+      if (opt?.hasFloor) {
+        [1, 2, 3, 4, 5].forEach((n) => {
+          const option = document.createElement('option');
+          option.value = String(n);
+          option.textContent = `${n}층`;
+          option.selected = mod.config.floor === n;
+          floorSelect.appendChild(option);
+        });
+      } else if (opt?.hasSection) {
+        ['하층', '중층', '상층'].forEach((section) => {
+          const option = document.createElement('option');
+          option.value = section;
+          option.textContent = section;
+          option.selected = section === mod.config.wallSection;
+          floorSelect.appendChild(option);
+        });
+      }
     }
     groundSelect.addEventListener('change', () => {
       mod.config.groundSuffix = groundSelect.value;
@@ -11093,7 +11218,7 @@
     statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
     startBtn.addEventListener('click', () => {
       const opt = mod.GROUND_OPTIONS.find((o) => o.suffix === groundSelect.value);
-      mod.config.floor = opt && opt.hasFloor ? Number(floorSelect.value) : null;
+      if (opt?.hasFloor) mod.config.floor = Number(floorSelect.value);
       Core.startModule('autohunt');
     });
     stopBtn.addEventListener('click', () => Core.requestStopModule('autohunt'));
