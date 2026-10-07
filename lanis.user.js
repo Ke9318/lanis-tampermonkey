@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.121-stable
+// @version      1.16.164-stable
 // @description  성장 기능은 현재 게임 탭에서 사용자가 하나씩 직접 호출하고, 전투/일일 기능과 실행 권한을 분리한 통합 패널.
 // @match        https://lanis.me/*
 // @noframes
@@ -13,7 +13,7 @@
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 // Compatibility artifact only. Production update authority is Operator/Bridge local approved releases.
 
-// Ranis Shared Core 1.3.117
+// Ranis Shared Core 1.3.160
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 (function (global) {
   'use strict';
@@ -21,13 +21,13 @@
   global.__lanisSharedCoreBootstrap = function (options = {}) {
     if (global.__lanisSharedCoreAdapter) {
       if (options.mode !== 'headless') {
-        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.117' });
+        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.160' });
         global.__mountLanisUnifiedPanel?.();
         global.__mountLanisBossTool?.();
       }
       return global.__lanisSharedCoreAdapter;
     }
-    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.117' });
+    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.160' });
 (function () {
   'use strict';
 
@@ -394,6 +394,42 @@
     return Core.waitFor(checkFn, timeoutMs, 300, shouldCancel);
   };
 
+  // 알림 배지(레드닷·숫자)가 붙은 메뉴 항목은 textContent가 "업적1"처럼 늘어난다.
+  // 2026-10-05/06 실전: 캐릭 레드닷이 있을 때만 "업적" 항목을 못 찾았다. 항목 전체 글자
+  // 또는 항목 안의 말단 글자 하나가 정확히 같으면 같은 항목으로 본다.
+  // 2026-10-07 달빛뱁새: 배지가 글자를 감싸는 구조(<span>업적<span>1</span></span>)면 "업적"이
+  // 말단이 아닌 요소의 직접 텍스트라 위 두 비교를 모두 빠져나갔다. 직접 텍스트도 비교한다.
+  Core.menuItemLabelMatches = function (el, itemText) {
+    if (!el) return false;
+    if (el.textContent.trim() === itemText) return true;
+    const ownText = (node) => Array.from(node.childNodes || [])
+      .filter((child) => child.nodeType === 3)
+      .map((child) => child.nodeValue)
+      .join('')
+      .trim();
+    return [el, ...el.querySelectorAll('*')].some((child) =>
+      (child.childElementCount === 0 && child.textContent.trim() === itemText) || ownText(child) === itemText);
+  };
+
+  // 메뉴 항목을 못 찾았을 때 실제로 열린 메뉴 항목을 남긴다(기록 전용).
+  Core.describeOpenMenuItems = function () {
+    const menus = document.querySelectorAll('[role="menu"]').length;
+    const items = [...document.querySelectorAll('[role="menuitem"]')]
+      .slice(0, 12)
+      .map((el) => `"${String(el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 30)}"${Core.isElementVisible(el) ? '' : '(숨김)'}`);
+    return `메뉴 ${menus}개, 항목=${items.length ? items.join(', ') : '없음'}`;
+  };
+
+  // 메뉴 항목을 못 찾고 실패할 때 열린 상단 메뉴가 남으면 뒤의 상단 버튼(계정 아이콘 등)이
+  // 가려져 다음 작업이 연쇄 실패했다. MUI 메뉴의 배경을 눌러 닫는다(합성 클릭으로 닫히는 경로).
+  Core.closeOpenMenus = function () {
+    let closed = 0;
+    document.querySelectorAll('.MuiMenu-root .MuiBackdrop-root, .MuiPopover-root .MuiBackdrop-root').forEach((backdrop) => {
+      if (typeof backdrop.click === 'function') { backdrop.click(); closed += 1; }
+    });
+    return closed;
+  };
+
   Core.clickNavMenuExact = async function (
     navLabel,
     itemText,
@@ -410,7 +446,7 @@
     // 화면에 뜵지(이전 사이클의 메뉴가 안 닫힌 상태) 확인하고, 뜵으면 "${navLabel}"를
     // 아예 누르지 않고 바로 항목을 클릭한다.
     const findItem = () => [...document.querySelectorAll('[role="menuitem"]')].find(
-      (el) => el.textContent.trim() === itemText && Core.isElementVisible(el)
+      (el) => Core.isElementVisible(el) && Core.menuItemLabelMatches(el, itemText)
     ) || null;
     const openFresh = async () => {
       const navBtn = await Core.waitFor(
@@ -428,7 +464,11 @@
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
       const itemEl = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-      if (!itemEl) throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
+      if (!itemEl) {
+        Core.log('core', `메뉴 "${navLabel}" 항목 목록("${itemText}" 없음): ${Core.describeOpenMenuItems()}`);
+        Core.closeOpenMenus();
+        throw new Error(`메뉴 항목 "${itemText}"를 찾을 수 없음`);
+      }
       if (!(await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) {
         throw new Error(`메뉴 항목 "${itemText}"가 클릭 직전에 사라짐`);
       }
@@ -466,7 +506,10 @@
         throw new Error(`상단 메뉴 "${navLabel}" 버튼이 클릭 직전에 사라짐`);
       }
       const itemEl = await Core.waitFor(findItem, 15000, 300, shouldCancel);
-      if (!itemEl) throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
+      if (!itemEl) {
+        Core.closeOpenMenus();
+        throw new Error(`메뉴 항목("...${suffixText}")을 찾을 수 없음`);
+      }
       if (!(await Core.safeClick(findItem, { beforeMin: item.min, beforeMax: item.max, shouldCancel }))) {
         throw new Error(`메뉴 항목("...${suffixText}")이 클릭 직전에 사라짐`);
       }
@@ -721,6 +764,24 @@
 
     let used = 0;
     const maxAttempts = 50;
+    // "사용" 버튼이 비활성인 행은 지금 쓸 수 없는 상자다. 예전에는 버튼 존재만 보고
+    // 행을 골라, 쓸 수 있는 상자를 다 쓴 뒤 남은 비활성 행에서 클릭이 실패해 단계 전체가
+    // 실패로 끝났다(2026-10-06 수면양말, 목록 끝에서 2회 재현). 활성 버튼 행만 쓰고,
+    // 비활성 행은 이름을 남긴다.
+    const useButtonOf = (tr, enabledOnly) => [...tr.querySelectorAll('button')].find((b) =>
+      b.textContent.trim() === '사용' &&
+      (!enabledOnly || (!b.disabled && b.getAttribute('aria-disabled') !== 'true'))) || null;
+    const findUsableRow = () => Core.gameElements('tr').find(
+      (tr) => useButtonOf(tr, true) && Core.isElementVisible(tr)
+    );
+    const unusable = new Set();
+    const noteUnusableRows = () => {
+      for (const tr of Core.gameElements('tr')) {
+        if (Core.isElementVisible(tr) && useButtonOf(tr, false) && !useButtonOf(tr, true)) {
+          unusable.add(String(tr.textContent || '').replace(/\s+/g, ' ').replace(/\s*사용\s*$/, '').trim().slice(0, 40));
+        }
+      }
+    };
     for (let i = 0; i < maxAttempts; i++) {
       if (shouldCancel()) throw new Error('사용자가 보상 상자 실행을 정지했습니다.');
       // ⚠ 버그 수정(2026-08, 사용자 확인): 실전에서 "보상" 카테고리 상자를
@@ -736,11 +797,12 @@
         await Core.selectOnlyInventoryCategory('보상', moduleId);
       }
 
-      let row = Core.gameElements('tr').find(
-        (tr) =>
-          [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용') &&
-          Core.isElementVisible(tr)
-      );
+      // 필터를 켠 직후나 상자를 쓴 직후에는 목록이 다시 그려지는 중일 수 있다. 한 번만 읽으면
+      // 상자가 남아 있어도 "사용할 상자 없음"으로 끝났다(2026-10-07 렌더링 감사). 처음엔 6초,
+      // 사용 뒤엔 2.5초까지 사용 가능한 행을 기다린다. 끝내 없으면 기존처럼 다음 페이지를 본다.
+      let row = await Core.waitFor(findUsableRow, i === 0 ? 6000 : 2500, 200, shouldCancel);
+      if (shouldCancel()) throw new Error('사용자가 보상 상자 실행을 정지했습니다.');
+      noteUnusableRows();
       // ⚠ 버그 수정(2026-08, 사용자 확인): 보상 상자 종류가 많으면(실전 확인:
       // 완성된 이면의 보상/완성된 지하의 보상/이면의 보상/지하의 보상/
       // 지하의 보상(매우어려움) 등 5종류 이상) 목록이 여러 페이지로 나뉘는데,
@@ -754,16 +816,21 @@
         if (!nextPageBtn) break;
         nextPageBtn.click();
         await Core.humanDelay(500, 800);
-        row = Core.gameElements('tr').find(
-          (tr) =>
-            [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용') &&
-            Core.isElementVisible(tr)
-        );
+        noteUnusableRows();
+        row = findUsableRow();
         if (!row) break;
       }
-      const useBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-      if (!(await Core.safeClick(() => useBtn, { beforeMin: 500, beforeMax: 900, shouldCancel }))) {
-        throw new Error('보상 상자 "사용" 버튼 클릭에 실패했습니다.');
+      // 상자를 쓰고 나면 게임이 인벤토리 목록을 다시 그려서, 미리 잡아 둔 버튼은 클릭 직전
+      // 대기(0.5~0.9초) 사이에 화면에서 떨어져 나갔다(2026-10-07 수면양말: 88개 남은 활성 행에서
+      // 클릭 실패). 클릭 순간에 사용 가능한 행의 버튼을 다시 찾는다.
+      const currentUseButton = () => {
+        const fresh = findUsableRow();
+        return fresh ? useButtonOf(fresh, true) : null;
+      };
+      if (!(await Core.safeClick(currentUseButton, { beforeMin: 500, beforeMax: 900, shouldCancel }))) {
+        // 활성 버튼을 골랐는데도 실패하면 어떤 행이었는지 남겨 원인을 좁힌다.
+        const rowText = String(row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+        throw new Error(`보상 상자 "사용" 버튼 클릭에 실패했습니다(행: ${rowText}).`);
       }
       const dialog = await Core.waitFor(() => {
         const d = Core.gameElements('[role="dialog"]').find(
@@ -804,15 +871,16 @@
       }
     }
     if (used >= maxAttempts) {
-      const remainingOnPage = Core.gameElements('tr').some(
-        (tr) => Core.isElementVisible(tr) && [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '사용')
-      );
+      const remainingOnPage = !!findUsableRow();
       const hasMorePages = Core.gameElements('button').some(
         (b) => b.getAttribute('aria-label') === 'Go to next page' && !b.disabled && Core.isElementVisible(b)
       );
       if (remainingOnPage || hasMorePages) {
         throw new Error(`보상 상자 ${maxAttempts}종 처리 상한에 도달했고 사용 가능한 상자가 남아 있습니다.`);
       }
+    }
+    if (unusable.size) {
+      Core.log(moduleId, `⚠ 사용할 수 없는 보상 상자(사용 버튼 비활성) ${unusable.size}종 건너뜀: ${[...unusable].join(', ')}`);
     }
     if (used > 0) {
       Core.log(moduleId, `보상 상자 사용 완료: 총 ${used}개`);
@@ -837,6 +905,12 @@
     if (!(await Core.safeClick(consumableTab, { beforeMin: 600, beforeMax: 1100, afterMin: 700, afterMax: 1300 }))) {
       throw new Error('소모품 탭을 열지 못했습니다.');
     }
+    // 목록이 그려지기 전에 읽으면 돌이 있어도 "없음"으로 보고 상점에서 다시 샀다
+    // (2026-10-07 렌더링 감사). 소모품 행이 보일 때까지 기다린다.
+    const inventoryRendered = await Core.waitFor(() => (
+      Core.gameElements('tr').some((tr) => tr.querySelector('td') && Core.isElementVisible(tr)) ? true : null
+    ), 6000, 200);
+    if (!inventoryRendered) Core.log('core', `⚠ 소모품 목록이 6초 안에 보이지 않음("${stoneName}" 확인)`);
 
     let useButton = null;
     for (let page = 1; page <= 20 && !useButton; page++) {
@@ -909,6 +983,15 @@
     빛: '에렌시아',
     어둠: '데자브',
   };
+
+  // 보스 엔진은 별도 IIFE라 Core 지역 변수에 접근할 수 없다(과거 "Core is not
+  // defined" 실패). 두 엔진에서 내용이 완전히 같은 순수 규칙만 고정된 읽기 전용
+  // 공개 adapter로 공유한다. 실제 DOM 판독·돌 사용/구매·정지·확인창·이동·로그는
+  // 각 소유자(Core/보스)가 따로 유지한다. normal 묶음이 보스보다 먼저 설치된다.
+  window.__lanisSharedGameRules = Object.freeze({
+    ELEMENT_TO_TOWN: Object.freeze({ ...Core.ELEMENT_TO_TOWN }),
+    classifyPresetApplyNotice: Core.classifyPresetApplyNotice,
+  });
 
   Core.readCurrentCharacterName = function () {
     const banner = document.querySelector('[role="banner"], header');
@@ -1213,6 +1296,13 @@
         throw new Error('인벤토리 소모품 탭을 열지 못했습니다.');
       }
     }
+    // 탭만 확인하고 바로 읽으면(이미 선택돼 있으면 대기 없음) 목록이 그려지기 전이라 기름이
+    // 0개·없음으로 읽혔다(2026-10-07 렌더링 감사). 소모품 행이 보일 때까지 기다린다.
+    const consumableRowsRendered = await Core.waitFor(() => (
+      Core.gameElements('tr').some((tr) => tr.querySelector('td') && Core.isElementVisible(tr)) ? true : null
+    ), 6000, 200, shouldCancel);
+    if (shouldCancel && shouldCancel()) return false;
+    if (!consumableRowsRendered) Core.log('core', '⚠ 소모품 목록이 6초 안에 보이지 않음(장비용 기름 확인)');
     return true;
   };
 
@@ -1396,12 +1486,37 @@
       const materials = cells[1].textContent.replace(/\s+/g, ' ').trim();
       return result === Core.EQUIPMENT_OIL_NAME && materials === '광산용 기름';
     });
-    const safeRows = await Core.waitFor(
-      () => findSafeRows().length === 1 ? findSafeRows() : null,
-      8000,
-      200,
-      shouldCancel
-    );
+    // 조합 레시피 목록은 여러 페이지로 나뉠 수 있다(실전 2026-10-05: 광산용 기름
+    // 전용 레시피가 '일반' 2페이지). 1페이지부터 유한 순회하며 찾는다.
+    const pageButton = (label) => Core.gameElements('button').find((button) =>
+      button.getAttribute('aria-label') === label && !button.disabled && Core.isElementVisible(button)
+    ) || null;
+    const firstPage = pageButton('Go to page 1');
+    const onFirstPage = Core.gameElements('button').some((button) =>
+      button.getAttribute('aria-label') === 'page 1' && Core.isElementVisible(button));
+    if (firstPage && !onFirstPage && !(await Core.safeClick(firstPage, {
+      beforeMin: 400, beforeMax: 700, afterMin: 500, afterMax: 800, shouldCancel,
+    }))) {
+      throw new Error('장비용 기름 레시피 검색을 위해 조합 목록 1페이지로 돌아가지 못했습니다.');
+    }
+    let safeRows = null;
+    for (let page = 1; page <= 20 && !safeRows; page++) {
+      if (shouldCancel && shouldCancel()) return 0;
+      safeRows = await Core.waitFor(
+        () => findSafeRows().length === 1 ? findSafeRows() : null,
+        page === 1 ? 8000 : 3000,
+        200,
+        shouldCancel
+      );
+      if (safeRows || findSafeRows().length > 1) break;
+      const next = pageButton('Go to next page');
+      if (!next) break;
+      if (!(await Core.safeClick(next, {
+        beforeMin: 400, beforeMax: 700, afterMin: 500, afterMax: 800, shouldCancel,
+      }))) {
+        throw new Error('장비용 기름 레시피 검색 중 다음 조합 목록 페이지로 이동하지 못했습니다.');
+      }
+    }
     if (!safeRows) {
       throw new Error('초록 구슬이 없는 "광산용 기름" 전용 장비용 기름 레시피를 하나로 확정하지 못했습니다.');
     }
@@ -1969,6 +2084,12 @@
     const tag = moduleDisplayLabel(moduleId);
     const line = `[${time}][${tag}] ${msg}`;
     console.log('[라니스 통합매크로]', line);
+    // Operator 로그로도 남겨 원격 진단이 화면 없이 가능하게 한다(기록 전용).
+    try {
+      window.dispatchEvent(new CustomEvent('lanis:core-log', {
+        detail: JSON.stringify({ moduleId: String(moduleId || ''), message: String(msg).slice(0, 500) }),
+      }));
+    } catch (_) {}
     if (Core.dailyActive && Array.isArray(Core.dailyRunLog)) {
       Core.dailyRunLog.push({ at: Date.now(), moduleId, message: String(msg) });
       if (Core.dailyRunLog.length > 1000) Core.dailyRunLog.splice(0, Core.dailyRunLog.length - 1000);
@@ -2040,6 +2161,13 @@
         ctx.onstatechange = () => this.resume();
         this.resume();
         this.startHealthLoop();
+        // 자동재생 정책(사용자 클릭 없음)에 막히면 오디오가 suspended로 남아 숨은 탭이
+        // 크게 느려진다. 막힌 사실을 Operator 로그로 남긴다(2026-10-06 룰루비데 정체).
+        setTimeout(() => {
+          if (this.ctx === ctx && ctx.state !== 'running') {
+            Core.log('core', `백그라운드 유지 오디오가 시작되지 않음(state=${ctx.state}) — 숨은 탭에서 매크로가 느려질 수 있음`);
+          }
+        }, 1500);
       } catch (e) {
         Core.log('core', `백그라운드 유지 오디오 시작 실패: ${e.message}`);
       }
@@ -2055,7 +2183,11 @@
     },
   };
   document.addEventListener('visibilitychange', () => {
-    if (Core.backgroundKeeper.owners.size > 0) Core.backgroundKeeper.resume();
+    const keeper = Core.backgroundKeeper;
+    if (keeper.owners.size > 0) {
+      keeper.resume();
+      Core.log('core', `탭 표시 상태: ${document.visibilityState} (유지 오디오 ${keeper.ctx ? keeper.ctx.state : '없음'})`);
+    }
   });
   window.__lanisBackgroundKeeper = Core.backgroundKeeper;
 
@@ -2107,11 +2239,75 @@
     }
   };
 
-  Core.showBanner = function (moduleId, msg, isSuccess = false) {
+  Core.showBanner = function (moduleId, msg, isSuccess = false, dailyCompletionStatus = null) {
     if (!Core.bannerEl) return;
-    Core.bannerEl.querySelector('span').textContent = `${isSuccess ? '✅' : '⚠'} [${moduleDisplayLabel(moduleId)}] ${msg}`;
+    if (moduleId === 'daily' && dailyCompletionStatus) {
+      Core.showDailyCompletionBanner(msg, dailyCompletionStatus);
+      return;
+    }
+    const banner = Core.bannerEl;
+    if (Core.dailyBannerOriginalStyles) {
+      const { bannerStyle, messageStyle, closeStyle } = Core.dailyBannerOriginalStyles;
+      banner.style.cssText = bannerStyle;
+      const message = banner.querySelector('span');
+      const close = banner.querySelector('#lrm-banner-close');
+      if (message) message.style.cssText = messageStyle;
+      if (close) close.style.cssText = closeStyle;
+      Core.dailyBannerOriginalStyles = null;
+    }
+    const message = banner.querySelector('span');
+    if (!message) return;
+    message.textContent = `${isSuccess ? '✅' : '⚠'} [${moduleDisplayLabel(moduleId)}] ${msg}`;
     Core.bannerEl.style.background = isSuccess ? '#2e7d32' : '#b71c1c';
     Core.bannerEl.style.display = 'flex';
+    Core.startTitleFlash();
+  };
+
+  Core.showDailyCompletionBanner = function (msg, status) {
+    if (!Core.bannerEl) return;
+    const banner = Core.bannerEl;
+    const message = banner.querySelector('span');
+    const close = banner.querySelector('#lrm-banner-close');
+    if (!message || !close) return;
+
+    const presentation = {
+      success: { title: '✅ 일일매크로 완료', accent: '#55c68b' },
+      issues: { title: '⚠️ 일일매크로 이슈', accent: '#f2b84b' },
+      stopped: { title: '⏹ 일일매크로 정지', accent: '#8e9bab' },
+    }[status];
+    if (!presentation) throw new Error(`알 수 없는 일일 배너 상태: ${status}`);
+
+    if (!Core.dailyBannerOriginalStyles) {
+      Core.dailyBannerOriginalStyles = {
+        bannerStyle: banner.style.cssText,
+        messageStyle: message.style.cssText,
+        closeStyle: close.style.cssText,
+      };
+    }
+
+    banner.style.cssText = [
+      'position:fixed', 'top:16px', 'left:50%', 'right:auto', 'transform:translateX(-50%)',
+      'z-index:1000000', 'width:min(640px, calc(100vw - 32px))', 'box-sizing:border-box',
+      'display:flex', 'align-items:flex-start', 'gap:16px', 'padding:16px',
+      'background:#202630', 'color:#f4f6f8', 'border:1px solid #46505e',
+      `border-left:5px solid ${presentation.accent}`, 'border-radius:10px',
+      'box-shadow:0 8px 28px rgba(0,0,0,.38)', 'font:14px/1.5 sans-serif',
+    ].join(';');
+    message.style.cssText = 'display:flex;flex:1;min-width:0;flex-direction:column;gap:6px;white-space:normal;overflow-wrap:anywhere';
+    close.style.cssText = [
+      'flex:none', 'background:#f4f6f8', 'color:#202630', 'border:0', 'padding:8px 14px',
+      'border-radius:6px', 'cursor:pointer', 'margin:0', 'font:600 13px/1.3 sans-serif',
+    ].join(';');
+
+    const heading = document.createElement('div');
+    heading.textContent = presentation.title;
+    heading.style.cssText = `font-size:16px;font-weight:700;color:${presentation.accent}`;
+    const body = document.createElement('div');
+    body.textContent = String(msg);
+    body.style.cssText = 'font-size:14px;line-height:1.55;color:#e1e5eb;white-space:pre-wrap;overflow-wrap:anywhere';
+    message.replaceChildren(heading, body);
+
+    banner.style.display = 'flex';
     Core.startTitleFlash();
   };
 
@@ -2229,6 +2425,8 @@
   // ==========================================================================
   // 모듈 정의: 재전직 / 자동사냥 / 재부여 / 던전 / 심층던전
   // ==========================================================================
+  const EVENT_BUNDLE_REGISTRY = Object.freeze([{"id":"autumn","label":"가을 이벤트","moduleIds":["preseason"],"runtimeAdapterModuleIds":["preseason"]},{"id":"preseasonArena","label":"프리시즌 무한아레나","moduleIds":["preseasonArena"],"runtimeAdapterModuleIds":[]}].map((bundle) => Object.freeze(bundle)));
+
   const MODULE_LABELS = {
     daily: '일일',
     trainingdecisions: '수행·결정',
@@ -2960,6 +3158,1222 @@
     createWebLockLeaseManager, createSemanticDomAdapter, createEngine };
 });
 
+  // -------------------------- 가을 심층던전 아레나 --------------------------
+  Modules.preseason = {
+    id: 'preseason',
+    running: false,
+    stopRequested: false,
+    cycleCount: 0,
+  };
+
+  Modules.preseason.readAutumnTokenProgress = function () {
+    const text = Core.bodyText();
+    const today = text.match(/오늘 획득한 단풍 토큰\s*(\d+)\s*\/\s*(\d+)\s*개/);
+    const weekly = text.match(/이번 주 획득한 단풍 토큰\s*(\d+)\s*\/\s*(\d+)\s*개/);
+    if (!today || !weekly) return null;
+    return {
+      today: { current: Number(today[1]), max: Number(today[2]) },
+      weekly: { current: Number(weekly[1]), max: Number(weekly[2]) },
+    };
+  };
+
+  Modules.preseason.findReadyBattleStartButton = function () {
+    return Core.allButtons().find((button) => {
+      const text = button.textContent.replace(/\s+/g, ' ').trim();
+      return text.startsWith('전투 시작') && !button.disabled &&
+        button.getAttribute('aria-disabled') !== 'true' && Core.isElementVisible(button);
+    }) || null;
+  };
+
+  Modules.preseason.readAutumnBoardProgress = function () {
+    const match = Core.bodyText().match(/진행\s*(\d+)\s*\/\s*(\d+)/);
+    if (!match) return null;
+    const current = Number(match[1]);
+    const max = Number(match[2]);
+    return Number.isInteger(current) && Number.isInteger(max) && max === 15 && current >= 0 && current <= max
+      ? { current, max }
+      : null;
+  };
+
+  Modules.preseason.goToAutumnBoard = async function (shouldCancel = Core.defaultShouldCancel) {
+    const onBoard = () =>
+      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
+      new URLSearchParams(location.search).get('tab') === 'board' &&
+      !!this.readAutumnBoardProgress();
+    if (onBoard()) return true;
+
+    if (location.pathname.replace(/\/$/, '') !== '/event/autumn') {
+      const headerButtons = Core.gameElements('header button').filter((button) => Core.isElementVisible(button));
+      const menuButton = headerButtons[headerButtons.length - 1];
+      if (!menuButton) throw new Error('상단 오른쪽 메뉴 아이콘을 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => menuButton, { shouldCancel }))) {
+        throw new Error('상단 오른쪽 메뉴 아이콘 클릭에 실패했습니다.');
+      }
+      const autumnMenu = await Core.waitFor(
+        () => Core.gameElements('[role="menuitem"]').find(
+          (item) => Core.isElementVisible(item) && item.textContent.trim() === '가을 이벤트'
+        ) || null,
+        5000,
+        150,
+        shouldCancel
+      );
+      if (!autumnMenu) throw new Error('오른쪽 메뉴에서 "가을 이벤트"를 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => autumnMenu, { shouldCancel }))) {
+        throw new Error('오른쪽 메뉴의 "가을 이벤트" 클릭에 실패했습니다.');
+      }
+      const autumnPage = await Core.waitFor(
+        () => location.pathname.replace(/\/$/, '') === '/event/autumn' ? true : null,
+        12000,
+        250,
+        shouldCancel
+      );
+      if (!autumnPage) throw new Error('가을 이벤트 화면 진입을 확인하지 못했습니다.');
+    }
+
+    const boardTab = await Core.waitFor(
+      () => Core.findButtonByText('성장 보드'),
+      7000,
+      200,
+      shouldCancel
+    );
+    if (!boardTab) throw new Error('가을 이벤트의 "성장 보드" 탭을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => Core.findButtonByText('성장 보드'), {
+      beforeMin: 500,
+      beforeMax: 900,
+      afterMin: 700,
+      afterMax: 1100,
+      shouldCancel,
+    }))) throw new Error('"성장 보드" 탭 클릭에 실패했습니다.');
+    const ready = await Core.waitFor(() => onBoard() ? true : null, 10000, 250, shouldCancel);
+    if (!ready) throw new Error('성장 보드 진행 상태를 확인하지 못했습니다.');
+    return true;
+  };
+
+  Modules.preseason.readBoardStageNumber = function (element) {
+    const labels = [element, ...element.querySelectorAll('*')].flatMap((label) => {
+      const ariaLabel = label.getAttribute?.('aria-label')?.trim();
+      const text = label.children.length === 0 ? label.textContent.trim() : '';
+      return [ariaLabel, text].filter(Boolean);
+    });
+    const matched = labels.map((label) => label.match(/^([1-9]|1[0-5])\s*(?:단계)?$/)).find(Boolean);
+    return matched ? Number(matched[1]) : null;
+  };
+
+  Modules.preseason.findAvailableBoardStageButtons = function () {
+    return Core.gameElements('button, [role="button"]').filter((button) => {
+      // 단계 버튼의 전체 text는 숫자만이 아닐 수 있다(번호·잠금/보상 문구가
+      // 함께 렌더됨). 실제 page는 native button 또는 role=button이고, 번호는
+      // leaf text 또는 aria-label에 올 수 있으므로 semantic label로 식별한다.
+      const stage = this.readBoardStageNumber(button);
+      return stage !== null &&
+        Core.isElementVisible(button) &&
+        !button.disabled && !button.hasAttribute('disabled') &&
+        button.getAttribute('aria-disabled') !== 'true';
+    });
+  };
+
+  Modules.preseason.describeBoardStageControls = function () {
+    // Diagnostics only: retain the exact selection facts when a live board
+    // presents a numbered control but the strict next-stage predicate cannot
+    // accept it.  This prevents the next repair from guessing at React/ARIA
+    // timing or visibility behavior.
+    return Core.gameElements('button, [role="button"]').map((button) => {
+      const text = button.textContent.replace(/\s+/g, ' ').trim();
+      const stage = this.readBoardStageNumber(button);
+      return {
+        tag: button.tagName.toLowerCase(), text: text.slice(0, 48),
+        ariaLabel: button.getAttribute('aria-label') || '', stage,
+        disabled: !!button.disabled || button.hasAttribute('disabled'),
+        ariaDisabled: button.getAttribute('aria-disabled') || '',
+        visible: Core.isElementVisible(button),
+      };
+    }).filter((entry) => entry.stage !== null || /(?:^|\D)(?:[1-9]|1[0-5])(?:\D|$)/.test(`${entry.text} ${entry.ariaLabel}`));
+  };
+
+  Modules.preseason.findBoardStageCard = function (stage) {
+    // The live Board title is rendered as `1 . 스탯 …`: its stage number and
+    // period are separated by whitespace and the leaf can be a span, not a p.
+    // Match the semantic stage label, rather than a particular tag or the old
+    // no-space `1.` formatting.
+    const title = Core.gameElements('*').find(
+      (el) => el.children.length === 0 && new RegExp(`^${stage}(?:\\s*\\.\\s*|\\s*단계(?:\\s|$))`).test(el.textContent.trim())
+    );
+    if (!title) return null;
+    let node = title.parentElement;
+    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+      const claimButtons = [...node.querySelectorAll('button')].filter(
+        (button) => button.textContent.trim() === '수령'
+      );
+      if (node.textContent.includes('보상') && claimButtons.length === 1) {
+        return { card: node, button: claimButtons[0] };
+      }
+    }
+    return null;
+  };
+
+  Modules.preseason.isBoardStageClaimed = function (stage) {
+    const title = Core.gameElements('*').find(
+      (el) => el.children.length === 0 && new RegExp(`^${stage}(?:\\s*\\.\\s*|\\s*단계(?:\\s|$))`).test(el.textContent.trim())
+    );
+    if (!title) return false;
+    let node = title.parentElement;
+    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+      if (node.textContent.includes('보상') && node.textContent.includes('수령 완료')) return true;
+    }
+    return false;
+  };
+
+  Modules.preseason.claimAutumnBoardRewards = async function (shouldCancel = Core.defaultShouldCancel) {
+    const mod = this;
+    await mod.goToAutumnBoard(shouldCancel);
+    let claimed = 0;
+
+    for (let guard = 0; guard < 15; guard += 1) {
+      if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
+      const before = mod.readAutumnBoardProgress();
+      if (!before) throw new Error('성장 보드 진행도를 읽지 못했습니다.');
+      if (before.current >= before.max) {
+        return claimed > 0
+          ? `성장 보드 보상 ${claimed}단계 수령 완료(${before.current}/${before.max})`
+          : `성장 보드 보상 이미 완료(${before.current}/${before.max})`;
+      }
+
+      const expectedStage = before.current + 1;
+      // Board progress becomes visible before the stage controls finish
+      // rendering.  The prior immediate snapshot saw no enabled stage at
+      // progress 0/15 in the live Chrome page and failed before step 1 could
+      // be selected.  Wait for precisely the next stage; do not guess or
+      // click another numbered control.
+      const availableStages = await Core.waitFor(() => {
+        const buttons = mod.findAvailableBoardStageButtons();
+        const numbers = buttons.map((button) => mod.readBoardStageNumber(button));
+        return buttons.length === 1 && numbers[0] === expectedStage ? buttons : null;
+      }, 8000, 200, shouldCancel);
+      if (!availableStages) {
+        const availableNumbers = mod.findAvailableBoardStageButtons()
+          .map((button) => mod.readBoardStageNumber(button));
+        const controls = mod.describeBoardStageControls().map((entry) =>
+          `${entry.tag}:${entry.text || '?'}(label=${entry.ariaLabel || '-'},stage=${entry.stage ?? '-'},disabled=${entry.disabled ? 1 : 0},aria=${entry.ariaDisabled || '-'},visible=${entry.visible ? 1 : 0})`
+        ).join(', ');
+        throw new Error(
+          `성장 보드 활성 단계 불일치: 진행 ${before.current}/${before.max}, ` +
+          `기대 ${expectedStage}단계, 실제 ${availableNumbers.length ? availableNumbers.join(',') : '없음'}; ` +
+          `후보 ${controls || '없음'}`
+        );
+      }
+
+      if (!(await Core.safeClick(
+        () => mod.findAvailableBoardStageButtons().find(
+          (button) => mod.readBoardStageNumber(button) === expectedStage
+        ) || null,
+        {
+          beforeMin: 500,
+          beforeMax: 900,
+          afterMin: 700,
+          afterMax: 1100,
+          shouldCancel,
+        }
+      ))) throw new Error(`성장 보드 ${expectedStage}단계 선택에 실패했습니다.`);
+
+      const claimable = await Core.waitFor(() => {
+        const current = mod.readAutumnBoardProgress();
+        if (!current || current.current !== before.current) return null;
+        const stageCard = mod.findBoardStageCard(expectedStage);
+        if (!stageCard || !stageCard.card.textContent.includes('보상')) return null;
+        const button = stageCard.button;
+        return Core.isElementVisible(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
+          ? stageCard
+          : null;
+      }, 8000, 250, shouldCancel);
+      if (!claimable) {
+        throw new Error(`성장 보드 ${expectedStage}단계의 보상과 활성 "수령" 버튼을 확인하지 못했습니다.`);
+      }
+
+      const received = await Core.safeClick(
+        () => {
+          const stageCard = mod.findBoardStageCard(expectedStage);
+          if (!stageCard) return null;
+          const button = stageCard.button;
+          return Core.isElementVisible(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
+            ? button
+            : null;
+        },
+        {
+          beforeMin: 350,
+          beforeMax: 650,
+          afterMin: 1000,
+          afterMax: 1500,
+          shouldCancel,
+          afterCheck: () => {
+            const after = mod.readAutumnBoardProgress();
+            return after && after.current === before.current + 1 && mod.isBoardStageClaimed(expectedStage)
+              ? after
+              : null;
+          },
+          afterTimeout: 12000,
+        }
+      );
+      if (!received) {
+        throw new Error(`성장 보드 ${expectedStage}단계 수령 후 진행도 증가와 "수령 완료"를 확인하지 못했습니다.`);
+      }
+      claimed += 1;
+      Core.log('preseason', `성장 보드 ${expectedStage}단계 보상 수령 확인(${before.current + 1}/${before.max})`);
+    }
+
+    const finalProgress = mod.readAutumnBoardProgress();
+    if (!finalProgress || finalProgress.current !== finalProgress.max) {
+      throw new Error('성장 보드 15단계 처리 후 완료 상태를 확인하지 못했습니다.');
+    }
+    return `성장 보드 보상 ${claimed}단계 수령 완료(${finalProgress.current}/${finalProgress.max})`;
+  };
+
+  Modules.preseason.findPunchKingCard = function (targetName) {
+    const nameLeaf = Core.gameElements('*').find(
+      (el) => el.children.length === 0 && el.textContent.trim() === targetName
+    );
+    if (!nameLeaf) return null;
+    let node = nameLeaf.parentElement;
+    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
+      const challengeButtons = [...node.querySelectorAll('button')].filter(
+        (button) => button.textContent.trim() === '도전하기'
+      );
+      if (challengeButtons.length !== 1 || !node.textContent.includes('이번 주 최고 기록')) continue;
+      const scoreMatch = node.textContent.match(/이번 주 최고 기록\s*([\d,]+)/);
+      return {
+        card: node,
+        button: challengeButtons[0],
+        score: scoreMatch ? Number(scoreMatch[1].replace(/,/g, '')) : null,
+      };
+    }
+    return null;
+  };
+
+  Modules.preseason.readPunchKingWeeklyRecords = function () {
+    const records = {};
+    for (const targetName of ['짚 허수아비', '강철 허수아비']) {
+      const target = this.findPunchKingCard(targetName);
+      if (!target || !Number.isFinite(target.score)) return null;
+      records[targetName] = target.score;
+    }
+    return records;
+  };
+
+  Modules.preseason.readPunchKingResultScore = function (targetName) {
+    const resultTitle = Core.gameElements('*').find(
+      (el) => el.children.length === 0 && el.textContent.trim() === `${targetName} 펀치킹 도전`
+    );
+    if (!resultTitle) return null;
+    let card = resultTitle.parentElement;
+    for (let depth = 0; card && depth < 8; depth += 1, card = card.parentElement) {
+      if (!card.textContent.includes('누적 데미지')) continue;
+      const scoreLeaf = [...card.querySelectorAll('*')].find(
+        (el) => el.children.length === 0 && /^[\d,]+$/.test(el.textContent.trim())
+      );
+      if (!scoreLeaf) continue;
+      const score = Number(scoreLeaf.textContent.replace(/,/g, ''));
+      return Number.isFinite(score) && score > 0 ? score : null;
+    }
+    return null;
+  };
+
+  Modules.preseason.claimPunchKingWeeklyRewardIfAvailable = async function (
+    shouldCancel = Core.defaultShouldCancel
+  ) {
+    const mod = this;
+    const findRewardTab = () => Core.gameElements('[role="tab"]').find(
+      (tab) => Core.isElementVisible(tab) && tab.textContent.trim() === '보상'
+    ) || null;
+    const findBattleTab = () => {
+      const tabs = Core.gameElements('[role="tab"]').filter(
+        (tab) => Core.isElementVisible(tab) && tab.textContent.trim() === '도전'
+      );
+      if (tabs.length > 1) throw new Error(`허수아비 펀치킹의 도전 탭이 ${tabs.length}개입니다.`);
+      return tabs[0] || null;
+    };
+    const isOnWeeklyReward = () =>
+      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
+      findRewardTab()?.getAttribute('aria-selected') === 'true' &&
+      Core.bodyText().includes('주간 보상');
+    const inspectReward = () => {
+      if (!isOnWeeklyReward()) return null;
+      const claimButtons = Core.allButtons().filter(
+        (button) => Core.isElementVisible(button) && button.textContent.trim() === '보상 수령'
+      );
+      const enabledClaimButtons = claimButtons.filter(
+        (button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true'
+      );
+      if (enabledClaimButtons.length === 1) return { state: 'CLAIMABLE', button: enabledClaimButtons[0] };
+      if (enabledClaimButtons.length > 1) {
+        throw new Error(`허수아비 펀치킹 주간 보상 수령 버튼이 ${enabledClaimButtons.length}개입니다.`);
+      }
+      const completed = Core.bodyText().includes('보상 수령 완료') ||
+        Core.allButtons().some((button) => Core.isElementVisible(button) && button.textContent.trim() === '수령 완료');
+      return completed ? { state: 'ALREADY_CLAIMED' } : null;
+    };
+
+    await mod.goToAutumnPunchKing(shouldCancel);
+    if (shouldCancel()) throw new Error('사용자가 일일 실행을 중단했습니다.');
+    const rewardTab = await Core.waitFor(findRewardTab, 7000, 200, shouldCancel);
+    if (!rewardTab) throw new Error('허수아비 펀치킹의 보상 탭을 찾지 못했습니다.');
+    if (rewardTab.getAttribute('aria-selected') !== 'true') {
+      if (!(await Core.safeClick(findRewardTab, {
+        beforeMin: 350,
+        beforeMax: 650,
+        afterMin: 450,
+        afterMax: 750,
+        shouldCancel,
+      }))) throw new Error('허수아비 펀치킹의 보상 탭 클릭에 실패했습니다.');
+    }
+    const reward = await Core.waitFor(inspectReward, 10000, 250, shouldCancel);
+    if (!reward) throw new Error('허수아비 펀치킹 주간 보상 화면 또는 수령 상태를 확인하지 못했습니다.');
+
+    if (reward.state === 'CLAIMABLE') {
+      const claimed = await Core.safeClick(
+        () => {
+          const current = inspectReward();
+          return current?.state === 'CLAIMABLE' ? current.button : null;
+        },
+        {
+          beforeMin: 350,
+          beforeMax: 650,
+          afterMin: 900,
+          afterMax: 1400,
+          shouldCancel,
+          afterCheck: () => inspectReward()?.state === 'ALREADY_CLAIMED' ? true : null,
+          afterTimeout: 12000,
+        }
+      );
+      if (!claimed) throw new Error('허수아비 펀치킹 주간 보상 수령 후 완료 상태를 확인하지 못했습니다.');
+      Core.log('preseason', '허수아비 펀치킹 주간 보상 수령 완료');
+    } else {
+      Core.log('preseason', '허수아비 펀치킹 주간 보상 이미 수령');
+    }
+
+    const battleTab = await Core.waitFor(findBattleTab, 7000, 200, shouldCancel);
+    if (!battleTab) throw new Error('허수아비 펀치킹의 도전 탭을 찾지 못했습니다.');
+    if (!(await Core.safeClick(findBattleTab, {
+      beforeMin: 350,
+      beforeMax: 650,
+      afterMin: 450,
+      afterMax: 750,
+      shouldCancel,
+      afterCheck: () => mod.readPunchKingWeeklyRecords() || null,
+      afterTimeout: 10000,
+    }))) throw new Error('허수아비 펀치킹의 도전 탭 복귀 또는 주간 기록 확인에 실패했습니다.');
+
+    return {
+      ok: true,
+      skipped: reward.state !== 'CLAIMABLE',
+      code: reward.state === 'CLAIMABLE'
+        ? 'PUNCH_KING_WEEKLY_REWARD_CLAIMED'
+        : 'PUNCH_KING_WEEKLY_REWARD_ALREADY_CLAIMED',
+    };
+  };
+
+  // 펀치킹 전투 결과는 완료 화면이 아니라 목록으로 복귀해야만 다음 대상 또는
+  // 이벤트 다음 단계로 진행할 수 있는 중간 화면이다. 결과 직후뿐 아니라
+  // 업데이트/재개 등으로 이 화면에서 다시 진입했을 때도 같은 복귀를 보장한다.
+  Modules.preseason.returnFromPunchKingResult = async function (shouldCancel = Core.defaultShouldCancel) {
+    const onResult = () =>
+      location.pathname.replace(/\/$/, '') === '/autumn-battle' &&
+      Core.bodyText().includes('펀치킹 도전');
+    if (!onResult()) return false;
+
+    // 결과 점수 heading은 CTA보다 먼저 렌더될 수 있다. 따라서 점수 확인 직후
+    // 한 번만 찾지 말고, 실제로 visible+enabled 된 정확한 복귀 버튼을 기다린다.
+    const returnButton = await Core.waitFor(() => {
+      const button = Core.findButtonByText('허수아비 펀치킹으로 돌아가기');
+      return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
+    }, 15000, 200, shouldCancel);
+    if (!returnButton) throw new Error('펀치킹 결과 화면의 "허수아비 펀치킹으로 돌아가기" 버튼을 기다리는 중 찾지 못했습니다.');
+
+    const returned = await Core.safeClick(
+      () => Core.findButtonByText('허수아비 펀치킹으로 돌아가기'),
+      {
+        beforeMin: 180,
+        beforeMax: 360,
+        shouldCancel,
+        afterCheck: () =>
+          location.pathname.replace(/\/$/, '') === '/event/autumn' &&
+          !Core.bodyText().includes('펀치킹 도전') &&
+          this.readPunchKingWeeklyRecords()
+            ? true
+            : null,
+        afterTimeout: 15000,
+      }
+    );
+    if (!returned) throw new Error('펀치킹 결과 화면의 "허수아비 펀치킹으로 돌아가기" 클릭 또는 목록 복귀 확인에 실패했습니다.');
+    return true;
+  };
+
+  Modules.preseason.goToAutumnPunchKing = async function (shouldCancel = Core.defaultShouldCancel) {
+    const onPunchKing = () =>
+      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
+      !!this.readPunchKingWeeklyRecords();
+    await this.returnFromPunchKingResult(shouldCancel);
+    if (onPunchKing()) return true;
+
+    if (location.pathname.replace(/\/$/, '') !== '/event/autumn') {
+      const headerButtons = Core.gameElements('header button').filter((button) => Core.isElementVisible(button));
+      const menuButton = headerButtons[headerButtons.length - 1];
+      if (!menuButton) throw new Error('상단 오른쪽 메뉴 아이콘을 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => menuButton, { shouldCancel }))) {
+        throw new Error('상단 오른쪽 메뉴 아이콘 클릭에 실패했습니다.');
+      }
+      const autumnMenu = await Core.waitFor(
+        () => Core.gameElements('[role="menuitem"]').find(
+          (item) => Core.isElementVisible(item) && item.textContent.trim() === '가을 이벤트'
+        ) || null,
+        5000,
+        150,
+        shouldCancel
+      );
+      if (!autumnMenu) throw new Error('오른쪽 메뉴에서 "가을 이벤트"를 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => autumnMenu, { shouldCancel }))) {
+        throw new Error('오른쪽 메뉴의 "가을 이벤트" 클릭에 실패했습니다.');
+      }
+      const autumnPage = await Core.waitFor(
+        () => location.pathname.replace(/\/$/, '') === '/event/autumn' ? true : null,
+        12000,
+        250,
+        shouldCancel
+      );
+      if (!autumnPage) throw new Error('가을 이벤트 화면 진입을 확인하지 못했습니다.');
+    }
+
+    const punchKingTab = await Core.waitFor(
+      () => Core.findButtonByText('허수아비 펀치킹'),
+      7000,
+      200,
+      shouldCancel
+    );
+    if (!punchKingTab) throw new Error('가을 이벤트의 "허수아비 펀치킹" 탭을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => Core.findButtonByText('허수아비 펀치킹'), { shouldCancel }))) {
+      throw new Error('"허수아비 펀치킹" 탭 클릭에 실패했습니다.');
+    }
+    const ready = await Core.waitFor(() => onPunchKing() ? true : null, 10000, 250, shouldCancel);
+    if (!ready) throw new Error('허수아비 펀치킹 주간 기록 화면을 확인하지 못했습니다.');
+    return true;
+  };
+
+  Modules.preseason.runPunchKingIfMissing = async function (shouldCancel = Core.defaultShouldCancel) {
+    const mod = this;
+    await mod.claimPunchKingWeeklyRewardIfAvailable(shouldCancel);
+    const initialRecords = mod.readPunchKingWeeklyRecords();
+    if (!initialRecords) throw new Error('허수아비 펀치킹 주간 최고 기록을 읽지 못했습니다.');
+
+    const missingTargets = Object.entries(initialRecords)
+      .filter(([, score]) => score === 0)
+      .map(([targetName]) => targetName);
+    if (missingTargets.length === 0) {
+      const summary = Object.entries(initialRecords)
+        .map(([name, score]) => `${name} ${score.toLocaleString()}`)
+        .join(', ');
+      Core.log('preseason', `허수아비 펀치킹 주간 기록 있음(${summary}) → 실행 생략`);
+      return `허수아비 펀치킹 실행 생략: ${summary}`;
+    }
+
+    Core.log('preseason', `주간 기록 0인 허수아비(${missingTargets.join(', ')}) 확인 → 공용 프리셋 "히드라" 적용`);
+    await Core.applyCommonPreset('히드라', 'preseason');
+    if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
+    await mod.goToAutumnPunchKing(shouldCancel);
+
+    const completed = [];
+    for (const targetName of missingTargets) {
+      if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
+      const before = mod.findPunchKingCard(targetName);
+      if (!before || before.score === null) {
+        throw new Error(`${targetName}의 주간 최고 기록을 다시 읽지 못했습니다.`);
+      }
+      if (before.score > 0) {
+        Core.log('preseason', `${targetName} 주간 기록이 이미 ${before.score.toLocaleString()}으로 갱신됨 → 도전 생략`);
+        continue;
+      }
+      if (before.score !== 0) throw new Error(`${targetName}의 주간 최고 기록이 올바르지 않습니다.`);
+
+      const clicked = await Core.safeClick(
+        () => {
+          const current = mod.findPunchKingCard(targetName);
+          return current && current.score === 0 ? current.button : null;
+        },
+        {
+          beforeMin: 500,
+          beforeMax: 900,
+          shouldCancel,
+          afterCheck: () => location.pathname.replace(/\/$/, '') === '/autumn-battle' ? true : null,
+          afterTimeout: 15000,
+        }
+      );
+      if (!clicked) throw new Error(`${targetName} "도전하기" 클릭 또는 결과 화면 확인에 실패했습니다.`);
+
+      const result = await Core.waitFor(() => {
+        return mod.readPunchKingResultScore(targetName);
+      }, 15000, 250, shouldCancel);
+      if (!result) throw new Error(`${targetName} 펀치킹 결과 점수를 확인하지 못했습니다.`);
+
+      const returned = await mod.returnFromPunchKingResult(shouldCancel);
+      if (!returned) throw new Error(`${targetName} 결과 화면에서 펀치킹 목록 복귀 상태를 확인하지 못했습니다.`);
+      const verified = mod.findPunchKingCard(targetName);
+      if (!verified || !Number.isFinite(verified.score) || verified.score <= 0) {
+        throw new Error(`${targetName} 도전 후 주간 최고 기록 갱신을 확인하지 못했습니다.`);
+      }
+      completed.push(`${targetName} ${verified.score.toLocaleString()}`);
+      Core.log('preseason', `${targetName} 펀치킹 1회 완료: 주간 최고 기록 ${verified.score.toLocaleString()}`);
+    }
+    return completed.length > 0
+      ? `허수아비 펀치킹 완료: ${completed.join(', ')}`
+      : '허수아비 펀치킹 실행 생략: 확인 중 주간 기록 갱신됨';
+  };
+
+  Modules.preseason.goToAutumnDeepArena = async function () {
+    const onArena = () =>
+      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
+      Core.bodyText().includes('오늘 획득한 단풍 토큰') &&
+      Core.bodyText().includes('이번 주 획득한 단풍 토큰');
+    if (onArena()) return true;
+
+    // 우측 끝 프로필 아이콘 → 가을 이벤트 → 심층던전 아레나 순서로 진입한다.
+    const headerButtons = Core.gameElements('header button').filter((button) => Core.isElementVisible(button));
+    const menuButton = headerButtons[headerButtons.length - 1];
+    if (!menuButton) throw new Error('상단 오른쪽 메뉴 아이콘을 찾지 못했습니다.');
+    menuButton.click();
+    const autumnMenu = await Core.waitFor(
+      () => Core.gameElements('[role="menuitem"]').find(
+        (item) => Core.isElementVisible(item) && item.textContent.trim() === '가을 이벤트'
+      ) || null,
+      5000,
+      150
+    );
+    if (!autumnMenu) throw new Error('오른쪽 메뉴에서 "가을 이벤트"를 찾지 못했습니다.');
+    await Core.humanDelay(500, 900);
+    autumnMenu.click();
+
+    const autumnPage = await Core.waitFor(
+      () => location.pathname.replace(/\/$/, '') === '/event/autumn' ? true : null,
+      12000,
+      250
+    );
+    if (!autumnPage) throw new Error('가을 이벤트 화면 진입을 확인하지 못했습니다.');
+    const arenaTab = await Core.waitFor(
+      () => Core.findButtonByText('심층던전 아레나'),
+      7000,
+      200
+    );
+    if (!arenaTab) throw new Error('가을 이벤트의 "심층던전 아레나" 탭을 찾지 못했습니다.');
+    await Core.humanDelay(500, 900);
+    arenaTab.click();
+    const ready = await Core.waitFor(() => onArena() ? true : null, 10000, 250);
+    if (!ready) throw new Error('심층던전 아레나 진행률 화면을 확인하지 못했습니다.');
+    return true;
+  };
+
+  Modules.preseason.runAutumnDeepArenaUntilCap = async function (shouldCancel = Core.defaultShouldCancel) {
+    const mod = this;
+    await mod.goToAutumnDeepArena();
+    let fought = false;
+    while (!mod.stopRequested) {
+      const before = mod.readAutumnTokenProgress();
+      if (!before) throw new Error('오늘/주간 단풍 토큰 진행률을 읽지 못했습니다.');
+      if (before.today.current >= before.today.max || before.weekly.current >= before.weekly.max) {
+        return { ok: true, skipped: !fought, outcome: fought ? 'SUCCESS' : 'ALREADY_DONE', code: fought ? 'AUTUMN_DEEP_ARENA_COMPLETED' : 'AUTUMN_DEEP_ARENA_TOKEN_CAP_REACHED', progress: before };
+      }
+      Core.log('preseason', `단풍 토큰 획득 전투 준비: 오늘 ${before.today.current}/${before.today.max}, 주간 ${before.weekly.current}/${before.weekly.max}`);
+      if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED' };
+      const readyState = await Core.waitFor(() => {
+        const progress = mod.readAutumnTokenProgress();
+        if (progress && (progress.today.current >= progress.today.max || progress.weekly.current >= progress.weekly.max)) return { completed: true, progress };
+        const button = mod.findReadyBattleStartButton();
+        return button ? { completed: false, button } : null;
+      }, 12000, 250, shouldCancel);
+      if (!readyState) throw new Error('가을 심층던전 아레나의 완료 상태나 활성화된 "전투 시작" 버튼을 확인하지 못했습니다.');
+      if (readyState.completed) return { ok: true, skipped: !fought, outcome: fought ? 'SUCCESS' : 'ALREADY_DONE', code: fought ? 'AUTUMN_DEEP_ARENA_COMPLETED' : 'AUTUMN_DEEP_ARENA_TOKEN_CAP_REACHED', progress: readyState.progress };
+      if (!(await Core.safeClick(() => mod.findReadyBattleStartButton(), { beforeMin: 180, beforeMax: 420, afterMin: 120, afterMax: 260, shouldCancel }))) throw new Error('가을 심층던전 아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
+      const resultBack = await Core.waitFor(() => Core.findButtonByText('심층던전 아레나로 돌아가기'), 15000, 250, shouldCancel);
+      if (!resultBack) throw new Error('가을 심층던전 아레나 전투 결과 화면을 확인하지 못했습니다.');
+      if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED' };
+      await Core.humanDelay(180, 350);
+      if (!(await Core.safeClick(() => Core.findButtonByText('심층던전 아레나로 돌아가기'), { beforeMin: 150, beforeMax: 320, afterMin: 180, afterMax: 380, shouldCancel }))) throw new Error('"심층던전 아레나로 돌아가기" 버튼 클릭에 실패했습니다.');
+      const increased = await Core.waitFor(() => {
+        const after = mod.readAutumnTokenProgress();
+        return after && (after.today.current > before.today.current || after.weekly.current > before.weekly.current) ? after : null;
+      }, 12000, 300, shouldCancel);
+      if (!increased) throw new Error('전투 후 단풍 토큰 진행률 증가를 확인하지 못했습니다.');
+      fought = true;
+      mod.cycleCount++;
+      Core.updateModuleButtons();
+      Core.log('preseason', `가을 심층던전 아레나 전투 완료: 오늘 ${increased.today.current}/${increased.today.max}, 주간 ${increased.weekly.current}/${increased.weekly.max}`);
+      await Core.humanDelay(120, 280);
+    }
+    return { ok: true, stopped: true, code: 'STOPPED' };
+  };
+
+  Modules.preseason.mainLoop = async function () {
+    const mod = this;
+    mod.cycleCount = 0;
+    const shouldCancel = Core.defaultShouldCancel;
+    const stages = [];
+    const runStage = async (id, execute, describe = () => ({})) => {
+      if (shouldCancel()) return false;
+      try {
+        const result = await execute();
+        if (result?.stopped || shouldCancel()) return false;
+        stages.push({ id, ok: true, ...describe(result), result });
+      } catch (error) {
+        if (shouldCancel() || error?.isUserStop) return false;
+        const message = String(error?.message || error);
+        stages.push({ id, ok: false, code: `AUTUMN_EVENT_${id.toUpperCase()}_FAILED`, message });
+        Core.log('preseason', `⚠ 이벤트 ${id} 실패 — 다음 적용 가능한 단계를 계속합니다: ${message}`);
+      }
+      return true;
+    };
+
+    if (!(await runStage('punchKing', () => mod.runPunchKingIfMissing(shouldCancel), (message) => ({
+      code: String(message).includes('실행 생략') ? 'AUTUMN_PUNCH_KING_WEEKLY_RECORD_EXISTS' : 'AUTUMN_PUNCH_KING_COMPLETED',
+      outcome: String(message).includes('실행 생략') ? 'ALREADY_DONE' : 'SUCCESS', message,
+    })))) return;
+    if (!(await runStage('boardRewards', () => mod.claimAutumnBoardRewards(shouldCancel), (message) => ({ code: 'AUTUMN_BOARD_REWARDS_COMPLETED', outcome: 'SUCCESS', message })))) return;
+    if (!(await runStage('deepArena', () => mod.runAutumnDeepArenaUntilCap(shouldCancel), (result) => ({ code: result.code, outcome: result.outcome, message: result.code === 'AUTUMN_DEEP_ARENA_TOKEN_CAP_REACHED' ? '오늘 또는 주간 단풍 토큰 한도 도달 - 전투 생략' : '가을 심층던전 아레나 완료' })))) return;
+    if (!(await runStage('tokenUse', () => mod.useAutumnTokens(shouldCancel), (result) => ({ code: result?.usedCycles === 0 ? 'AUTUMN_TOKEN_USE_NOTHING_TO_USE' : 'AUTUMN_TOKEN_USE_COMPLETED', outcome: result?.usedCycles === 0 ? 'ALREADY_DONE' : 'SUCCESS', message: result?.usedCycles === 0 ? '사용할 단풍 토큰 없음 - 건너뜀' : '단풍 토큰 사용 완료' })))) return;
+
+    const failures = stages.filter((stage) => !stage.ok);
+    const summary = stages.map((stage) => stage.ok ? `${stage.id}[${stage.code}]: ${stage.message || stage.code}` : `${stage.id}[${stage.code}]: 실패(${stage.message})`).join(' / ');
+    if (failures.length) {
+      Core.moduleResults.preseason = { ok: false, code: 'AUTUMN_EVENT_PARTIAL_FAILURE', stages, message: summary, at: Date.now() };
+      Core.log('preseason', `⚠ 이벤트 일부 단계 실패(후속 단계는 실행됨): ${summary}`);
+      Core.showBanner('preseason', summary, false);
+      Core.stopModule('preseason');
+      return;
+    }
+    Core.notifyCompleted('preseason', summary);
+  };
+
+  // ⚠ 사용자 요청(2026-08): 가을 이벤트 "단풍 토큰"을 인벤토리에서
+  // 찾아 "사용 가능 상태"로 전환하는 일회성 액션. 프리시즌 탭에 묶어두고
+  // 프리시즌이 끝나면(여름 이벤트도 같이 끝날 것으로 예상) 이 로직도 함께
+  // 폐기한다. 자동 반복 매크로가 아니라 버튼 클릭 시 즉시 실행되는 1회성
+  // 액션이다.
+  //
+  // 실전 확인: "사용" 클릭 시 확인창이 뜨고, 수량 입력칸은 이미 그 아이템의
+  // 1회 사용 최대치(실전 확인: 50개)로 자동 채워져 있다(수정 불필요, 손대면
+  // 안 됨 - 보상 상자 사용 로직에서 겪은 것과 동일한 함정). "사용" 확정하면
+  // "단풍 토큰 N개를 사용 가능 상태로 전환했습니다"로 즉시 처리되고, 그
+  // 행이 목록에서 갱신된다(수량이 줄거나 완전히 사라짐). 보유 수량이
+  // 많으면(예: 547개) 여러 번 반복해야 다 소진된다.
+  Modules.preseason.useAutumnTokens = async function (shouldCancel = () => false) {
+    const stopIfRequested = () => {
+      if (!shouldCancel()) return;
+      const error = new Error('사용자가 단풍 토큰 사용을 정지했습니다.');
+      error.isUserStop = true;
+      throw error;
+    };
+    Core.log('preseason', '"단풍 토큰" 사용 시작');
+    stopIfRequested();
+    await Core.clickNavMenuExact('캐릭', '인벤토리');
+    const onInventoryPage = await Core.waitFor(() => location.pathname.startsWith('/inventory'), 15000, 300, shouldCancel);
+    if (!onInventoryPage) throw new Error('인벤토리 화면 진입을 확인하지 못했습니다.');
+    await Core.humanDelay(500, 900);
+
+    if (!(await Core.safeClick(() => Core.findButtonByText('소모품'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100, shouldCancel }))) {
+      throw new Error('"소모품" 탭 클릭에 실패했습니다.');
+    }
+
+    const findTokenRow = () => {
+      const rows = Core.gameElements('tr').filter((tr) => tr.textContent.includes('단풍 토큰') && Core.isElementVisible(tr));
+      if (rows.length > 1) throw new Error(`단풍 토큰 행이 ${rows.length}개입니다.`);
+      return rows[0] || null;
+    };
+    const readTokenQuantity = (row) => {
+      if (!row) return null;
+      const text = row.textContent.replace(/\s+/g, ' ');
+      const named = text.match(/단풍 토큰\s*(?:[x×]\s*)?([\d,]+)\s*개/)
+        || text.match(/단풍 토큰\s*[x×]\s*([\d,]+)/);
+      if (named) return Number(named[1].replace(/,/g, ''));
+      const cells = [...row.querySelectorAll('td')];
+      const countText = cells[1]?.textContent.trim() || '';
+      return /^[\d,]+$/.test(countText) ? Number(countText.replace(/,/g, '')) : null;
+    };
+
+    let usedCycles = 0;
+    const maxCycles = 30; // 1회당 최대 50개 * 30회 = 최대 1500개까지 대응
+    let exhausted = false;
+    for (; usedCycles < maxCycles;) {
+      stopIfRequested();
+      // 이전 사용으로 목록/페이지 구성이 바뀔 수 있으니 매번 1페이지로 복귀 후 탐색
+      const firstPageBtn = Core.gameElements('button').find(
+        (b) => b.getAttribute('aria-label') === 'Go to first page' && !b.disabled && Core.isElementVisible(b)
+      );
+      if (firstPageBtn) {
+        firstPageBtn.click();
+        await Core.humanDelay(300, 500);
+        stopIfRequested();
+      }
+
+      let row = findTokenRow();
+      if (!row) {
+        for (let page = 0; page < 20 && !row; page++) {
+          const nextPageBtn = Core.gameElements('button').find(
+            (b) => b.getAttribute('aria-label') === 'Go to next page' && !b.disabled && Core.isElementVisible(b)
+          );
+          if (!nextPageBtn) break;
+          nextPageBtn.click();
+          await Core.humanDelay(400, 700);
+          stopIfRequested();
+          row = findTokenRow();
+        }
+      }
+      if (!row) {
+        const morePages = Core.gameElements('button').some((b) =>
+          b.getAttribute('aria-label') === 'Go to next page' && !b.disabled && Core.isElementVisible(b)
+        );
+        if (morePages) throw new Error('단풍 토큰 인벤토리 탐색 페이지 한도에 도달했습니다.');
+        exhausted = true;
+        break;
+      }
+      const beforeQuantity = readTokenQuantity(row);
+      if (!Number.isSafeInteger(beforeQuantity) || beforeQuantity <= 0) {
+        throw new Error('단풍 토큰 사용 전 수량을 확인하지 못했습니다.');
+      }
+
+      const useBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (!useBtn) throw new Error('"단풍 토큰" 사용 버튼을 찾지 못했습니다.');
+      if (!(await Core.safeClick(() => useBtn, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1000, shouldCancel }))) {
+        throw new Error('"단풍 토큰" 사용 버튼 클릭에 실패했습니다.');
+      }
+
+      const dialog = await Core.waitFor(
+        () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('단풍 토큰을(를) 사용하시겠습니까')) || null,
+        6000,
+        250,
+        shouldCancel
+      );
+      if (!dialog) throw new Error('"단풍 토큰" 사용 확인창을 찾지 못했습니다.');
+
+      // ⚠ 수량 입력칸은 이미 1회 사용 최대치로 채워져 있다 - 절대 건드리지 않는다.
+      const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
+      if (!confirmBtn) throw new Error('"단풍 토큰" 사용 확인 버튼을 찾지 못했습니다.');
+      if (confirmBtn.disabled) throw new Error('"단풍 토큰" 사용 확인 버튼이 비활성화 상태입니다.');
+      if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400, shouldCancel }))) {
+        throw new Error('"단풍 토큰" 사용 클릭 결과를 확인하지 못했습니다. 재클릭하지 않습니다.');
+      }
+      const confirmed = await Core.waitFor(() => {
+        const openDialog = Core.gameElements('[role="dialog"]').some((d) =>
+          Core.isElementVisible(d) && d.textContent.includes('단풍 토큰을(를) 사용하시겠습니까')
+        );
+        if (openDialog) return null;
+        const current = findTokenRow();
+        if (!current) return true;
+        const afterQuantity = readTokenQuantity(current);
+        return Number.isSafeInteger(afterQuantity) && afterQuantity < beforeQuantity ? true : null;
+      }, 10000, 250, shouldCancel);
+      if (!confirmed) throw new Error('단풍 토큰 사용 후 행 수량 감소 또는 소멸을 확인하지 못했습니다. 재클릭하지 않습니다.');
+      usedCycles++;
+      Core.log('preseason', `"단풍 토큰" 사용 ${usedCycles}회차 완료`);
+    }
+
+    if (usedCycles === 0) {
+      Core.log('preseason', '"단풍 토큰"이 없거나 이미 전부 사용했습니다.');
+    } else {
+      Core.log('preseason', `"단풍 토큰" 사용 완료 (총 ${usedCycles}회 반복)`);
+    }
+    return { usedCycles, exhausted, bounded: usedCycles < maxCycles || exhausted };
+  };
+
+  const PRESEASON_ARENA_FISH_INTERVAL_MS = 30 * 60 * 1000;
+
+  function buildAutumnEventBox(container) {
+    const mod = Modules.preseason;
+    const refs = UIRefs.preseason;
+
+    const description = document.createElement('div');
+    description.textContent =
+      '이벤트 전체 흐름을 실행합니다: 허수아비 펀치킹(주간 기록 0인 대상만) → 성장 보드 보상 → 심층던전 아레나 → 단풍 토큰 사용. 오늘 또는 주간 토큰 한도에 도달하면 아레나를 마칩니다.';
+    description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
+    container.appendChild(description);
+
+    const note = document.createElement('div');
+    note.textContent = '※ 단독 실행과 일일매크로 모두 같은 이벤트 흐름을 사용합니다. 매 전투 후 오늘/주간 단풍 토큰 증가를 확인합니다.';
+    note.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:7px;';
+    container.appendChild(note);
+
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
+    const startBtn = document.createElement('button');
+    startBtn.textContent = '시작';
+    startBtn.style.cssText = btnStyle('#2e7d32');
+    const stopBtn = document.createElement('button');
+    stopBtn.textContent = '정지';
+    stopBtn.style.cssText = btnStyle('#c62828');
+    stopBtn.disabled = true;
+    const statusEl = document.createElement('span');
+    statusEl.textContent = '대기중';
+    statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
+    startBtn.addEventListener('click', () => Core.startModule('preseason'));
+    stopBtn.addEventListener('click', () => Core.requestStopModule('preseason'));
+    btnRow.append(startBtn, stopBtn);
+    container.append(btnRow, statusEl);
+
+    refs.startBtn = startBtn;
+    refs.stopBtn = stopBtn;
+    refs.statusEl = statusEl;
+    refs.inputs = [];
+
+    // ⚠ 사용자 요청(2026-08): "단풍 토큰"(가을 이벤트) 일괄 사용
+    // 버튼. 자동 반복 매크로가 아니라 눌렀을 때 그 자리에서 바로 실행되는
+    // 1회성 액션이라 시작/정지 상태와 무관하게 별도로 둔다.
+    const tokenBtnRow = document.createElement('div');
+    tokenBtnRow.style.cssText = 'margin-top:10px; padding-top:10px; border-top:1px solid #333;';
+    const tokenLabel = document.createElement('div');
+    tokenLabel.textContent = '단풍 토큰 일괄 사용 (가을 이벤트)';
+    tokenLabel.style.cssText = 'font-size:11px; color:#ccc; margin-bottom:5px;';
+    const tokenBtn = document.createElement('button');
+    tokenBtn.textContent = '단풍 토큰 사용';
+    tokenBtn.style.cssText = btnStyle('#8e5cf7');
+    const tokenStatusEl = document.createElement('span');
+    tokenStatusEl.textContent = '';
+    tokenStatusEl.style.cssText = 'margin-left:8px; font-size:11px; color:#aaa;';
+    tokenBtn.addEventListener('click', async () => {
+      tokenBtn.disabled = true;
+      tokenStatusEl.textContent = '사용 중...';
+      try {
+        const result = await Modules.preseason.useAutumnTokens();
+        if (!result.bounded) throw new Error('단풍 토큰 사용 횟수 한도에 도달해 남은 수량 확인이 필요합니다.');
+        tokenStatusEl.textContent = '완료';
+      } catch (e) {
+        tokenStatusEl.textContent = '실패: ' + e.message;
+        Core.log('preseason', `⚠ 단풍 토큰 사용 실패: ${e.message}`);
+      }
+      tokenBtn.disabled = false;
+    });
+    tokenBtnRow.append(tokenLabel, tokenBtn, tokenStatusEl);
+    container.appendChild(tokenBtnRow);
+  }
+
+  Modules.preseason.buildEventBox = buildAutumnEventBox;
+
+
+  // Managed Operator adapters are owned by the removable Autumn event bundle.
+  Modules.preseason.createOperatorAdapters = function (services) {
+    return {
+    async runAutumnPunchKing(request = {}) {
+      const auth = request.authorization;
+      const authorized = !!(request.source === 'runtime-host' && auth &&
+        auth.schema === 'autumn-punch-king-runtime-explicit-v1' && auth.explicit === true &&
+        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
+        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
+        auth.runtimeVersion === services.runtimeVersion && Number.isFinite(auth.issuedAt) &&
+        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
+      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
+      const identity = services.requireExpectedCharacter(request.expectedCharacter);
+      if (!identity.ok) return identity.result;
+      const leaseResult = await services.acquireExecutionLease({ owner: 'operator', job: 'autumn_punch_king', sessionId: auth.sessionId });
+      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: services.publicLease(leaseResult.lease), identity };
+      const shouldCancel = () => !!request.scope?.stopped;
+      try {
+        const message = await Modules.preseason.runPunchKingIfMissing(shouldCancel);
+        if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', identity };
+        const records = Modules.preseason.readPunchKingWeeklyRecords();
+        const verified = records && ['짚 허수아비', '강철 허수아비'].every((name) => Number.isFinite(records[name]) && records[name] > 0);
+        if (!verified) return { ok: false, code: 'AUTUMN_PUNCH_KING_VERIFY_FAILED', records, identity };
+        return { ok: true, verified: true, outcome: 'SUCCESS', message, records, identity };
+      } catch (error) {
+        if (shouldCancel() || error?.isUserStop) return { ok: true, stopped: true, code: 'STOPPED', identity };
+        return { ok: false, code: 'AUTUMN_PUNCH_KING_EXCEPTION', message: String(error?.message || error), identity };
+      } finally {
+        services.releaseExecutionLease(leaseResult.lease.leaseId);
+      }
+    },
+    async runAutumnDeepArena(request = {}) {
+      const auth = request.authorization;
+      const authorized = !!(request.source === 'runtime-host' && auth &&
+        auth.schema === 'autumn-deep-arena-runtime-explicit-v1' && auth.explicit === true &&
+        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
+        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
+        auth.runtimeVersion === services.runtimeVersion && Number.isFinite(auth.issuedAt) &&
+        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
+      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
+      const identity = services.requireExpectedCharacter(request.expectedCharacter);
+      if (!identity.ok) return identity.result;
+      const leaseResult = await services.acquireExecutionLease({ owner: 'operator', job: 'autumn_deep_arena', sessionId: auth.sessionId });
+      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: services.publicLease(leaseResult.lease), identity };
+      const mod = Modules.preseason;
+      const loopPromise = Core.startModule('preseason');
+      if (!loopPromise) {
+        services.releaseExecutionLease(leaseResult.lease.leaseId);
+        return { ok: false, skipped: true, code: 'START_REJECTED_BY_CORE', identity };
+      }
+      const unsubscribe = request.scope?.onStop(() => Core.requestStopModule('preseason'));
+      try {
+        await loopPromise;
+        if (request.scope?.stopped) return { ok: true, stopped: true, code: 'STOPPED', cycleCount: mod.cycleCount, identity };
+        const coreResult = Core.moduleResults.preseason || null;
+        if (coreResult?.ok === false) return { ok: false, code: 'AUTUMN_DEEP_ARENA_CORE_FAILED', result: coreResult, identity };
+        const progress = mod.readAutumnTokenProgress();
+        const verified = progress && (
+          progress.today.current >= progress.today.max || progress.weekly.current >= progress.weekly.max
+        );
+        if (!verified) return { ok: false, code: 'AUTUMN_DEEP_ARENA_VERIFY_FAILED', progress, result: coreResult, cycleCount: mod.cycleCount, identity };
+        return { ok: true, verified: true, outcome: 'SUCCESS', progress, result: coreResult, cycleCount: mod.cycleCount, identity };
+      } finally {
+        unsubscribe?.();
+        services.releaseExecutionLease(leaseResult.lease.leaseId);
+      }
+    },
+    async runAutumnTokenUse(request = {}) {
+      const auth = request.authorization;
+      const authorized = !!(request.source === 'runtime-host' && auth &&
+        auth.schema === 'autumn-token-use-runtime-explicit-v1' && auth.explicit === true &&
+        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
+        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
+        auth.runtimeVersion === services.runtimeVersion && Number.isFinite(auth.issuedAt) &&
+        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
+      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
+      const identity = services.requireExpectedCharacter(request.expectedCharacter);
+      if (!identity.ok) return identity.result;
+      const leaseResult = await services.acquireExecutionLease({ owner: 'operator', job: 'autumn_token_use', sessionId: auth.sessionId });
+      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: services.publicLease(leaseResult.lease), identity };
+      const shouldCancel = () => !!request.scope?.stopped;
+      try {
+        const usage = await Modules.preseason.useAutumnTokens(shouldCancel);
+        if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', identity };
+        if (!usage || usage.bounded !== true || usage.usedCycles > 30) return { ok: false, code: 'AUTUMN_TOKEN_USE_VERIFY_FAILED', usage, identity };
+        return { ok: true, verified: true, outcome: usage.usedCycles === 0 ? 'ALREADY_DONE' : 'SUCCESS', usage, identity };
+      } catch (error) {
+        if (shouldCancel() || error?.isUserStop) return { ok: true, stopped: true, code: 'STOPPED', identity };
+        return { ok: false, code: 'AUTUMN_TOKEN_USE_EXCEPTION', message: String(error?.message || error), identity };
+      } finally {
+        services.releaseExecutionLease(leaseResult.lease.leaseId);
+      }
+    },
+    async runAutumnBoardRewards(request = {}) {
+      const auth = request.authorization;
+      const authorized = !!(request.source === 'runtime-host' && auth &&
+        auth.schema === 'autumn-board-rewards-runtime-explicit-v1' && auth.explicit === true &&
+        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
+        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
+        auth.runtimeVersion === services.runtimeVersion && Number.isFinite(auth.issuedAt) &&
+        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
+      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
+      const identity = services.requireExpectedCharacter(request.expectedCharacter);
+      if (!identity.ok) return identity.result;
+      const leaseResult = await services.acquireExecutionLease({ owner: 'operator', job: 'autumn_board_rewards', sessionId: auth.sessionId });
+      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: services.publicLease(leaseResult.lease), identity };
+      const shouldCancel = () => !!request.scope?.stopped;
+      try {
+        const message = await Modules.preseason.claimAutumnBoardRewards(shouldCancel);
+        if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', identity };
+        const progress = Modules.preseason.readAutumnBoardProgress();
+        if (!progress || progress.current !== progress.max || progress.max !== 15) return { ok: false, code: 'AUTUMN_BOARD_VERIFY_FAILED', progress, identity };
+        return { ok: true, verified: true, outcome: 'SUCCESS', message, progress, identity };
+      } catch (error) {
+        if (shouldCancel() || error?.isUserStop) return { ok: true, stopped: true, code: 'STOPPED', identity };
+        return { ok: false, code: 'AUTUMN_BOARD_EXCEPTION', message: String(error?.message || error), identity };
+      } finally {
+        services.releaseExecutionLease(leaseResult.lease.leaseId);
+      }
+    },
+    };
+  };
+
+  Modules.preseasonArena = {
+    id: 'preseasonArena',
+    running: false,
+    stopRequested: false,
+    runId: 0,
+    loopPromise: null,
+    cycleCount: 0,
+    nextFishingAt: 0,
+  };
+
+  Modules.preseasonArena.ensureArena = async function () {
+    await Modules.arena.goToArena();
+    await Modules.arena.handleResultIfPresent();
+    if (!Core.bodyText().includes('프리시즌')) {
+      throw new Error('현재 아레나가 프리시즌 상태가 아닙니다. 무한아레나를 중단합니다.');
+    }
+  };
+
+  Modules.preseasonArena.waitForArenaStart = async function () {
+    const deadline = Date.now() + 95000;
+    while (!this.stopRequested && Date.now() < deadline) {
+      if (location.pathname.replace(/\/$/, '') !== '/arena') {
+        Core.log('preseasonArena', '다른 화면 감지 → 아레나로 자동 복귀');
+        await this.ensureArena();
+      }
+      const button = Core.findButtonByText('전투 시작');
+      if (button && !button.disabled) return button;
+      await Core.interruptibleSleep(800, () => this.stopRequested, 400);
+    }
+    return null;
+  };
+
+  Modules.preseasonArena.runFishingCycle = async function ({
+    shouldCancel = () => this.stopRequested,
+    moduleId = 'preseasonArena',
+    townName = '심포니아',
+  } = {}) {
+    if (!townName || typeof townName !== 'string') {
+      throw new Error('낚시 대상 마을을 확정하지 못했습니다.');
+    }
+    Core.log(moduleId, `통발 수거·재설치 작업 시작: ${townName} 낚시터`);
+    await Core.ensureAtTown(townName, moduleId);
+    if (shouldCancel()) return { stopped: true, collected: false, installed: false, townName };
+    await Core.clickNavMenuExact('마을', '낚시터', shouldCancel);
+    const arrived = await Core.waitFor(
+      () => location.pathname.startsWith('/fishing') && Core.bodyText().includes(`${townName} 낚시터`),
+      15000,
+      300,
+      shouldCancel
+    );
+    if (!arrived) throw new Error(`"${townName} 낚시터" 진입을 확인하지 못했습니다.`);
+    if (shouldCancel()) return { stopped: true, collected: false, installed: false, townName };
+
+    let installButton = Core.findButtonByText('통발 설치하기');
+    let collected = false;
+    if (!installButton) {
+      const collectButton = Core.findButtonByText('통발 수거하기');
+      if (!collectButton || collectButton.disabled) {
+        Core.log(moduleId, '통발이 아직 수거 불가 상태라 이번 확인은 보류합니다.');
+        return { stopped: false, collected: false, installed: false, deferred: true, townName };
+      }
+      if (!(await Core.safeClick(
+        () => {
+          if (shouldCancel()) return null;
+          const button = Core.findButtonByText('통발 수거하기');
+          return button && !button.disabled ? button : null;
+        },
+        { beforeMin: 450, beforeMax: 850, afterMin: 700, afterMax: 1100, shouldCancel }
+      ))) throw new Error('통발 수거 버튼 클릭에 실패했습니다.');
+      collected = true;
+      installButton = await Core.waitFor(() => Core.findButtonByText('통발 설치하기'), 8000, 250, shouldCancel);
+      if (!installButton) throw new Error('통발 수거 후 설치 버튼이 나타나지 않았습니다.');
+      Core.log(moduleId, '통발 수거 완료');
+    }
+
+    if (shouldCancel()) return { stopped: true, collected, installed: false, townName };
+    if (!(await Core.safeClick(
+      () => shouldCancel() ? null : Core.findButtonByText('통발 설치하기'),
+      { beforeMin: 450, beforeMax: 850, afterMin: 350, afterMax: 650, shouldCancel }
+    ))) throw new Error('통발 설치 버튼 클릭에 실패했습니다.');
+
+    const confirmButton = await Core.waitFor(() => {
+      const dialog = Core.gameElements('[role="dialog"]').find(
+        (el) => Core.isElementVisible(el) && el.textContent.includes('통발 설치 확인')
+      );
+      return dialog
+        ? [...dialog.querySelectorAll('button')].find((button) => button.textContent.trim() === '확인' && !button.disabled) || null
+        : null;
+    }, 6000, 200, shouldCancel);
+    if (!confirmButton) throw new Error('통발 설치 확인창의 확인 버튼을 찾지 못했습니다.');
+    if (!(await Core.safeClick(() => shouldCancel() ? null : confirmButton, {
+      beforeMin: 400,
+      beforeMax: 750,
+      afterMin: 700,
+      afterMax: 1100,
+      shouldCancel,
+    }))) throw new Error('통발 설치 확인에 실패했습니다.');
+    const installed = await Core.waitFor(
+      () => {
+        const button = Core.findButtonByText('통발 설치 중');
+        return button && button.disabled ? true : null;
+      },
+      8000,
+      250,
+      shouldCancel
+    );
+    if (!installed) throw new Error('통발 재설치 상태를 확인하지 못했습니다.');
+    Core.log(moduleId, '통발 설치 완료');
+    return { stopped: false, collected, installed: true, deferred: !collected, townName };
+  };
+
+  Modules.preseasonArena.mainLoop = async function () {
+    this.cycleCount = 0;
+    this.nextFishingAt = Date.now() + PRESEASON_ARENA_FISH_INTERVAL_MS;
+    await this.ensureArena();
+    while (!this.stopRequested) {
+      if (Date.now() >= this.nextFishingAt) {
+        await this.runFishingCycle();
+        this.nextFishingAt = Date.now() + PRESEASON_ARENA_FISH_INTERVAL_MS;
+        if (this.stopRequested) return;
+        await this.ensureArena();
+      } else {
+        await this.ensureArena();
+      }
+
+      const before = Modules.arena.readTodayBattleCount();
+      if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
+      const startButton = await this.waitForArenaStart();
+      if (!startButton) {
+        if (this.stopRequested) return;
+        throw new Error('95초 안에 아레나 전투 시작 버튼이 활성화되지 않았습니다.');
+      }
+      if (!(await Core.safeClick(
+        () => {
+          const button = Core.findButtonByText('전투 시작');
+          return button && !button.disabled ? button : null;
+        },
+        { beforeMin: 650, beforeMax: 1150 }
+      ))) throw new Error('프리시즌 아레나 전투 시작 클릭에 실패했습니다.');
+
+      const resultBack = await Core.waitFor(
+        () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
+        15000,
+        400
+      );
+      if (!resultBack) {
+        Core.log('preseasonArena', '결과 화면을 확인하지 못해 아레나 화면부터 다시 확인합니다.');
+        continue;
+      }
+      await Modules.arena.handleResultIfPresent();
+      const after = await Core.waitFor(() => {
+        const count = Modules.arena.readTodayBattleCount();
+        return count !== null && count > before ? count : null;
+      }, 15000, 300);
+      if (after === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
+      this.cycleCount++;
+      Core.updateModuleButtons();
+      const fishingIn = Math.max(0, Math.ceil((this.nextFishingAt - Date.now()) / 60000));
+      Core.log('preseasonArena', `아레나 전투 완료: 오늘 ${after}회 / 다음 통발 작업 약 ${fishingIn}분 후`);
+    }
+  };
+
+  function buildPreseasonArenaBox(container) {
+    // 프리시즌 일반 아레나는 보석 일일 한도와 무관하게 계속 돌 수 있으므로
+    // 기존 가을 이벤트 아레나와 실행 상태를 완전히 분리한다. 이 실행 중에는
+    // 30분마다 통발을 수거·재설치하고 다시 아레나로 돌아온다.
+    const infiniteRow = document.createElement('div');
+    infiniteRow.style.cssText = 'margin-top:10px; padding-top:10px; border-top:1px solid #333;';
+    const infiniteLabel = document.createElement('div');
+    infiniteLabel.textContent = '프리시즌 무한아레나 (30분마다 통발 수거·재설치)';
+    infiniteLabel.style.cssText = 'font-size:11px; color:#ccc; margin-bottom:5px;';
+    const infiniteDescription = document.createElement('div');
+    infiniteDescription.textContent = '횟수 제한 없이 일반 아레나를 반복합니다. 다른 화면으로 이동하면 자동 복귀하며, 통발 작업 후에도 아레나로 돌아옵니다.';
+    infiniteDescription.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:7px;';
+    const infiniteBtnRow = document.createElement('div');
+    infiniteBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center;';
+    const infiniteStartBtn = document.createElement('button');
+    infiniteStartBtn.textContent = '무한아레나 시작';
+    infiniteStartBtn.style.cssText = btnStyle('#1565c0');
+    const infiniteStopBtn = document.createElement('button');
+    infiniteStopBtn.textContent = '정지';
+    infiniteStopBtn.style.cssText = btnStyle('#c62828');
+    infiniteStopBtn.disabled = true;
+    const infiniteStatusEl = document.createElement('div');
+    infiniteStatusEl.textContent = '대기중';
+    infiniteStatusEl.style.cssText = 'font-size:11px; color:#ccc; margin-top:5px;';
+    infiniteStartBtn.addEventListener('click', () => Core.startModule('preseasonArena'));
+    infiniteStopBtn.addEventListener('click', () => Core.requestStopModule('preseasonArena'));
+    infiniteBtnRow.append(infiniteStartBtn, infiniteStopBtn);
+    infiniteRow.append(infiniteLabel, infiniteDescription, infiniteBtnRow, infiniteStatusEl);
+    container.appendChild(infiniteRow);
+
+    UIRefs.preseasonArena.startBtn = infiniteStartBtn;
+    UIRefs.preseasonArena.stopBtn = infiniteStopBtn;
+    UIRefs.preseasonArena.statusEl = infiniteStatusEl;
+    UIRefs.preseasonArena.inputs = [];
+  }
+
+  Modules.preseasonArena.buildEventBox = buildPreseasonArenaBox;
+
   Modules.daily = {
     id: 'daily',
     running: false,
@@ -3060,7 +4474,82 @@
   };
 
   Modules.daily.saveState = function (state) {
+    if (this.lastArenaObservation) state.arenaObservation = this.lastArenaObservation;
     localStorage.setItem(DAILY_STATE_KEY, JSON.stringify(state));
+  };
+
+  // 페이지 로드 직후 Daily 실행 상태의 재개·폐기 판단은 Daily가 소유한다. 통합
+  // 패널 init은 폐기 탭 복원인지 일반 새로고침인지만 가려 아래 함수를 호출하고,
+  // Daily 허가 키나 Daily 내부 필드를 직접 다루지 않는다. 판정·순서·로그는 이전
+  // 통합 패널 init과 같다.
+  Modules.daily.resumeAfterDiscardedTab = function () {
+    const state = this.loadState();
+    let auth = null;
+    try {
+      auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
+    } catch (e) {
+      auth = null;
+    }
+    const canResumeDaily = !!(
+      state &&
+      auth &&
+      auth.schema === DAILY_AUTH_SCHEMA &&
+      auth.startedAt === state.startedAt
+    );
+    if (canResumeDaily) {
+      this.stopRequested = false;
+      Core.dailyActive = true;
+      this.running = true;
+      Core.backgroundKeeper.acquire('daily');
+      Core.log(
+        'core',
+        `Chrome 폐기 탭 복원 감지: 일일 ${state.index + 1}/${state.steps.length} 단계부터 안전 재개`
+      );
+      Core.sleep(1800)
+        .then(() => this.mainLoop())
+        .catch((e) => {
+          Core.showBanner('daily', `폐기 탭 복구 중 오류: ${e.message}`, false);
+          return this.finalizeRun({
+            ok: false,
+            stopped: false,
+            message: e && e.message ? e.message : String(e),
+            at: Date.now(),
+          }, state);
+        })
+        .finally(() => { this.loopPromise = null; });
+      return true;
+    }
+    if (state) {
+      state.running = false;
+      this.saveState(state);
+    }
+    sessionStorage.removeItem(DAILY_AUTH_KEY);
+    Core.log('core', 'Chrome 폐기 탭 복원 감지: 유효한 일일 실행 허가가 없어 일일 작업은 중단');
+    return false;
+  };
+
+  // 일반 새로고침 뒤에는 저장값만으로 Daily를 재개하지 않는다. 오래된 running
+  // 상태를 살리면 같은 단계(특히 보스)를 처음부터 다시 실행할 수 있다.
+  Modules.daily.discardRunAfterReload = function () {
+    sessionStorage.removeItem(DAILY_AUTH_KEY);
+    const staleDaily = this.loadState();
+    if (staleDaily) {
+      staleDaily.running = false;
+      this.saveState(staleDaily);
+    }
+  };
+
+  Modules.daily.recordArenaObservation = function (result) {
+    const sourceObservedAt = Number.isFinite(result.result?.at) ? result.result.at : null;
+    this.lastArenaObservation = {
+      ok: result.ok === true, verified: result.verified === true,
+      skipped: result.skipped === true, deferred: result.deferred === true,
+      stopped: result.stopped === true, code: result.code || null,
+      state: result.state || result.status || result.outcome || null,
+      observedAt: sourceObservedAt ?? Date.now(), sourceObservedAt,
+    };
+    const arenaState = this.loadState();
+    if (arenaState) this.saveState(arenaState);
   };
 
   Modules.daily.migrateMissingPreseasonConfig = function () {
@@ -3375,6 +4864,10 @@
     return step === 'autohunt' && error?.code === 'AUTO_HUNT_OIL_RECOVERY_FAILED';
   };
 
+  Modules.daily.isFatalBossClearReadinessFailure = function (step, error) {
+    return step === 'boss' && error?.code === 'BOSS_CLEAR_READINESS_FAILED';
+  };
+
   Modules.daily.isFatalWeeklyRewardVerificationFailure = function (step, error) {
     return step === 'weeklyRewards' && !!error?.weeklyRewardResult?.blocked;
   };
@@ -3398,6 +4891,86 @@
     return { count: 1, valid, reason: valid ? null : 'value', progress: valid ? { current, target } : null };
   };
 
+  // 다른 화면(낚시터 등)에서 퀘스트 화면으로 돌아온 직후에는 탭이 선택돼 있어도 퀘스트
+  // 행이 아직 렌더링 전일 수 있다(2026-10-06 수면양말: 일간 8개 모두 "행 0개"). 한 개라도
+  // 보일 때까지 기다린 뒤 판정한다. 끝내 안 보이면 호출자가 기존대로 행 개수 실패를 남긴다.
+  Modules.daily.waitForQuestRows = async function (labels, shouldCancel) {
+    return !!(await Core.waitFor(
+      () => labels.some((label) => this.readQuestProgressRow(label).count > 0) ? true : null,
+      6000, 200, shouldCancel
+    ));
+  };
+
+  Modules.daily.captureQuestRunBinding = function () {
+    try {
+      const character = inspectCurrentCharacter();
+      if (!character) return null;
+      const state = this.loadState();
+      return JSON.stringify([character, new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        state?.sessionId, state?.runId, state?.commandId, state?.startedAt,
+        sessionStorage.getItem(DAILY_AUTH_KEY)]);
+    } catch (_) { return null; }
+  };
+
+  // A reuse context belongs to one reconciliation call and never enters saved state.
+  Modules.daily.createQuestAuditReuseContext = function () {
+    let generation = 0;
+    let closed = false;
+    const observations = new WeakMap();
+    const watched = new WeakSet();
+    const observer = typeof MutationObserver === 'function'
+      ? new MutationObserver(() => { generation++; }) : null;
+    const flushMutations = () => { if (observer?.takeRecords().length) generation++; };
+    const binding = () => this.captureQuestRunBinding();
+    const snapshot = (tabLabel) => {
+      // Missing observation capability never enables reuse.
+      if (typeof Core.gameElements !== 'function' || typeof Core.isElementVisible !== 'function') return null;
+      try {
+        if (!location.pathname.startsWith('/quests')) return null;
+        const tabs = Core.gameElements('[role="tab"]').filter((node) =>
+          Core.isElementVisible(node) && node.textContent.trim() === tabLabel);
+        if (tabs.length !== 1 || tabs[0].getAttribute('aria-selected') !== 'true') return null;
+        const identity = binding();
+        if (!identity) return null;
+        const nodes = [...Core.gameElements('p'), ...Core.gameElements('[role="tab"]'), ...Core.gameElements('button')];
+        return { identity, nodes, values: nodes.map((node) => JSON.stringify([
+          node.textContent, !!node.disabled, Core.isElementVisible(node), node.getAttribute?.('aria-selected'),
+        ])) };
+      } catch (_) { return null; }
+    };
+    return {
+      remember: (audit, tabLabel) => {
+        if (closed || !this.questAuditReadable(audit)) return audit;
+        flushMutations();
+        const witness = snapshot(tabLabel);
+        if (witness) {
+          for (const node of witness.nodes) {
+            if (observer && !watched.has(node)) {
+              observer.observe(node, { attributes: true, childList: true, characterData: true, subtree: true });
+              watched.add(node);
+            }
+          }
+          observations.set(audit, { ...witness, generation, result: JSON.stringify(audit) });
+        }
+        return audit;
+      },
+      valid: (audit, tabLabel) => {
+        flushMutations();
+        if (closed || this.stopRequested || !audit || !this.questAuditReadable(audit)) return false;
+        const before = observations.get(audit);
+        const current = before && snapshot(tabLabel);
+        const valid = !!current && before.generation === generation && before.identity === current.identity &&
+          before.result === JSON.stringify(audit) && before.nodes.length === current.nodes.length &&
+          before.nodes.every((node, index) => node === current.nodes[index] &&
+            node.isConnected !== false && before.values[index] === current.values[index]);
+        if (before && !valid) generation++;
+        return valid;
+      },
+      invalidate: () => { generation++; },
+      close: () => { closed = true; generation++; observer?.disconnect(); },
+    };
+  };
+
   // 일간/주간 퀘스트는 새 숙제 엔진이 아니라 Daily의 최종 숙제 점검/복구 계층이다.
   // 반드시 퀘스트 진행도를 먼저 읽고, 이미 완료된 항목은 원래 모듈을 재실행하지 않는다.
   Modules.daily.readQuestRequirement = async function (
@@ -3406,7 +4979,7 @@
     shouldCancel = () => this.stopRequested || !Core.dailyActive
   ) {
     if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', tabLabel, label };
-    await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
+    if (!location.pathname.startsWith('/quests')) await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
     const onPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300, shouldCancel);
     if (!onPage || shouldCancel()) {
       return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'QUEST_REQUIREMENT_PAGE_MISSING', tabLabel, label };
@@ -3431,6 +5004,9 @@
     if (!selected || shouldCancel()) {
       return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'QUEST_REQUIREMENT_TAB_NOT_SELECTED', tabLabel, label };
     }
+    // 탭이 선택돼도 퀘스트 행은 늦게 그려질 수 있다(2026-10-07 렌더링 감사, 감사 함수와 같은 대기).
+    await this.waitForQuestRows([label], shouldCancel);
+    if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', tabLabel, label };
 
     const reading = this.readQuestProgressRow(label);
     if (reading.count !== 1 || !reading.valid) {
@@ -3449,10 +5025,14 @@
     tabLabel,
     label,
     recover,
+    audit = null,
+    reuse = null,
     shouldCancel = () => this.stopRequested || !Core.dailyActive,
   }) {
-    const beforeRead = await this.readQuestRequirement(tabLabel, label, shouldCancel);
-    if (beforeRead?.stopped || beforeRead?.ok === false) return beforeRead;
+    const beforeRead = reuse?.valid(audit, tabLabel) && audit.progress?.[label]
+      ? { ok: true, verified: true, progress: audit.progress[label] }
+      : await this.readQuestRequirement(tabLabel, label, shouldCancel);
+    if (beforeRead?.stopped || beforeRead?.ok === false) { reuse?.invalidate(); return beforeRead; }
     const before = beforeRead.progress;
     if (before.current >= before.target) {
       return {
@@ -3467,6 +5047,7 @@
       };
     }
 
+    reuse?.invalidate(); // An attempted owner can affect both Daily and Weekly, even on failure.
     const recovery = await recover({ tabLabel, label, before });
     if (shouldCancel() || recovery?.stopped) {
       return {
@@ -3475,8 +5056,12 @@
       };
     }
     if (recovery === false || recovery?.ok === false) {
+      // 소유 기능의 실패 코드·사유를 결과 메시지에 남긴다(2026-10-06 수면양말 낚시: 사유 유실).
+      const ownerReason = recovery && typeof recovery === 'object' && (recovery.code || recovery.message)
+        ? [recovery.code, recovery.message].filter(Boolean).join(': ') : null;
       return {
         ok: false, verified: false, outcome: 'ACTION_FAILED', code: 'QUEST_REQUIREMENT_RECOVERY_FAILED',
+        message: ownerReason || undefined,
         tabLabel, label, before, recovery, recoveryCalled: true,
       };
     }
@@ -3492,6 +5077,15 @@
     if (after.target !== before.target || after.current < before.current) {
       return {
         ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'QUEST_REQUIREMENT_PROGRESS_REGRESSED',
+        tabLabel, label, before, after, recovery, recoveryCalled: true,
+      };
+    }
+    if (after.current === before.current && recovery?.outcome === 'DEFERRED') {
+      // 소유 기능이 스스로 보류를 선언한 경우(낚시 통발 미준비·빈 손 낚시 등)는 실패가
+      // 아니라 보류다. 진행도 불변을 실패로 바꾸면 소유 기능의 사유가 사라졌다(2026-10-06 호비).
+      return {
+        ok: true, verified: false, outcome: 'DEFERRED', code: recovery.code || 'QUEST_REQUIREMENT_RECOVERY_DEFERRED',
+        message: recovery.message, retryAfterMs: recovery.retryAfterMs,
         tabLabel, label, before, after, recovery, recoveryCalled: true,
       };
     }
@@ -3517,31 +5111,77 @@
   // 받았으면 버튼이 "수령 완료"로 바뀌며 disabled 상태가 된다. 7개 미만
   // 완료 상태의 disabled "보상 받기 (N/7)"와 수령 완료를 구분하고,
   // 어느 control도 없으면 완료로 추정하지 않는다.
-  Modules.daily.runQuestRewardJob = async function (tabLabel, shouldCancel = () => false) {
+  Modules.daily.runQuestRewardJob = async function (tabLabel, shouldCancel = () => false, reuse = null) {
     if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', tabLabel };
-    await Core.clickNavMenuExact('캐릭', '퀘스트');
-    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300);
-    if (!onQuestPage) {
-      Core.log('daily', `⚠ 퀘스트 화면 진입을 확인하지 못해 ${tabLabel} 퀘스트 보상 수령을 건너뜁니다.`);
+    const runBinding = this.captureQuestRunBinding();
+    const bindingValid = () => !!runBinding && this.captureQuestRunBinding() === runBinding;
+    const onRequestedTab = () => {
+      if (!location.pathname.startsWith('/quests')) return false;
+      const tabs = Core.gameElements('[role="tab"]').filter((tab) =>
+        Core.isElementVisible(tab) && tab.textContent.trim() === tabLabel);
+      return tabs.length === 1 && tabs[0].getAttribute('aria-selected') === 'true';
+    };
+    if (!location.pathname.startsWith('/quests')) await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
+    const onQuestPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300, shouldCancel);
+    if (!onQuestPage || shouldCancel()) {
+      reuse?.invalidate();
       return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'QUEST_REWARD_PAGE_FAILED', tabLabel };
     }
     await Core.humanDelay(500, 900);
-
-    if (tabLabel === '주간') {
-      const weeklyTab = await Core.retryStep('"주간" 탭 찾기', () => Core.findButtonByText('주간'));
-      if (!weeklyTab) {
-        Core.log('daily', '⚠ "주간" 탭을 찾지 못해 주간 퀘스트 보상 수령을 건너뜁니다.');
-        return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'WEEKLY_QUEST_TAB_MISSING', tabLabel };
-      }
-      if (!(await Core.safeClick(() => Core.findButtonByText('주간'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100 }))) {
-        Core.log('daily', '⚠ "주간" 탭 클릭에 실패해 주간 퀘스트 보상 수령을 건너뜁니다.');
-        return { ok: false, verified: false, outcome: 'ACTION_FAILED', code: 'WEEKLY_QUEST_TAB_CLICK_FAILED', tabLabel };
-      }
+    if (shouldCancel()) {
+      reuse?.invalidate();
+      return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', tabLabel };
     }
-
-    const rewardControls = Core.gameElements('button').filter((b) =>
+    // Both scopes must select their own tab; Daily must never read the Weekly control.
+    if (!(await this.ensureQuestProgressTab(tabLabel, shouldCancel, {
+      beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100,
+    }))) {
+      reuse?.invalidate();
+      return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'QUEST_REWARD_TAB_FAILED', tabLabel };
+    }
+    // 탭 선택(aria-selected)만 확인하고 바로 읽으면 보상 버튼·퀘스트 행이 그려지기 전이라
+    // 상태 없음/선행 조건 미달로 끝났다(2026-10-07 렌더링 감사). 읽을 내용이 보일 때까지 기다린다.
+    // 끝내 없으면 기존 판정(STATE_MISSING 등)을 그대로 쓴다.
+    const weeklyRewardLabels = ['주간 전투왕', '던전 정복자', '아레나 도전자', '개인 보스 사냥꾼',
+      '꾸준한 수행', '낚시광', '레어맵 정복자', '길드의 용사'];
+    const findRewardControls = () => Core.gameElements('button').filter((b) =>
       Core.isElementVisible(b) && (b.textContent.trim().startsWith('보상 받기') || b.textContent.trim() === '수령 완료')
     );
+    const rewardRendered = await Core.waitFor(() => (findRewardControls().length > 0 ? true : null), 6000, 200, shouldCancel);
+    if (tabLabel === '주간') await this.waitForQuestRows(weeklyRewardLabels, shouldCancel);
+    if (shouldCancel()) {
+      reuse?.invalidate();
+      return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', tabLabel };
+    }
+    if (!rewardRendered) Core.log('daily', `⚠ ${tabLabel} 퀘스트 보상: 6초 안에 보상 버튼이 보이지 않음`);
+
+    // All waits are over: reject a changed character/run/KST day before reading or clicking its reward.
+    if (!bindingValid() || !onRequestedTab()) {
+      reuse?.invalidate();
+      return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'QUEST_REWARD_BINDING_CHANGED', tabLabel };
+    }
+
+    if (tabLabel === '주간') {
+      // Read current rows synchronously after the delays; an old eligible audit cannot authorize this effect.
+      const progress = {};
+      for (const label of weeklyRewardLabels) {
+        const reading = this.readQuestProgressRow(label);
+        if (reading.count !== 1 || !reading.valid) {
+          reuse?.invalidate();
+          return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'WEEKLY_QUEST_REWARD_PREREQUISITE_UNMET', tabLabel };
+        }
+        progress[label] = reading.progress;
+      }
+      if (!this.weeklyQuestRecoveryDue() || !this.weeklyQuestRewardEligible({ ok: true, verified: true, progress })) {
+        reuse?.invalidate();
+        return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'WEEKLY_QUEST_REWARD_PREREQUISITE_UNMET', tabLabel };
+      }
+    }
+    const rewardControls = findRewardControls();
+    if (rewardControls.length > 1) {
+      reuse?.invalidate();
+      return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'QUEST_REWARD_CONTROL_AMBIGUOUS', tabLabel };
+    }
     const rewardBtn = rewardControls.find((b) => b.textContent.trim().startsWith('보상 받기') && !b.disabled);
     if (!rewardBtn) {
       const completed = rewardControls.find((b) => b.textContent.trim() === '수령 완료');
@@ -3551,22 +5191,34 @@
       }
       const incomplete = rewardControls.find((b) => b.textContent.trim().startsWith('보상 받기'));
       if (incomplete) {
+        reuse?.invalidate();
         const progress = incomplete.textContent.match(/(\d+)\s*\/\s*(\d+)/);
         const detail = progress ? { current: Number(progress[1]), target: Number(progress[2]) } : null;
         Core.log('daily', `${tabLabel} 퀘스트 보상: 아직 조건 미달${detail ? `(${detail.current}/${detail.target})` : ''}`);
         return { ok: true, skipped: true, verified: true, outcome: 'INCOMPLETE', code: tabLabel === '주간' ? 'WEEKLY_QUEST_REWARD_INCOMPLETE' : 'DAILY_QUEST_REWARD_INCOMPLETE', tabLabel, progress: detail };
       }
+      reuse?.invalidate();
       Core.log('daily', `⚠ ${tabLabel} 퀘스트 보상 상태를 판정할 control을 찾지 못했습니다.`);
       return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: tabLabel === '주간' ? 'WEEKLY_QUEST_REWARD_STATE_MISSING' : 'DAILY_QUEST_REWARD_STATE_MISSING', tabLabel };
     }
     if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', tabLabel };
+    if (!bindingValid() || !onRequestedTab() || shouldCancel()) {
+      reuse?.invalidate();
+      return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'QUEST_REWARD_BINDING_CHANGED', tabLabel };
+    }
+    reuse?.invalidate();
     rewardBtn.click();
     const completed = await Core.waitFor(() => {
+      if (shouldCancel() || !bindingValid() || !location.pathname.startsWith('/quests')) return null;
+      const tabs = Core.gameElements('[role="tab"]').filter((tab) =>
+        Core.isElementVisible(tab) && tab.textContent.trim() === tabLabel);
+      if (tabs.length !== 1 || tabs[0].getAttribute('aria-selected') !== 'true') return null;
       const controls = Core.gameElements('button').filter((b) => Core.isElementVisible(b));
       const remaining = controls.find((b) => b.textContent.trim().startsWith('보상 받기') && !b.disabled);
       if (remaining) return null;
       return controls.find((b) => b.textContent.trim() === '수령 완료') || null;
-    }, 6000, 250);
+    }, 6000, 250, shouldCancel);
+    if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', tabLabel };
     if (!completed) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'QUEST_REWARD_VERIFY_FAILED', tabLabel };
     Core.log('daily', `${tabLabel} 퀘스트 보상 수령 완료`);
     return { ok: true, verified: true, outcome: 'SUCCESS', code: tabLabel === '주간' ? 'WEEKLY_QUEST_REWARD_COMPLETED' : 'DAILY_QUEST_REWARD_COMPLETED', tabLabel };
@@ -3621,6 +5273,13 @@
     const findClaimButton = () => Core.gameElements('button').find(
       (button) => Core.isElementVisible(button) && button.textContent.trim() === '보상 수령' && !button.disabled
     ) || null;
+    // 경로만 확인하고 바로 읽으면 카테고리 탭이 그려지기 전이라 "0개 수령"으로 끝날 수 있다
+    // (2026-10-07 렌더링 감사). 카테고리 탭이나 수령 버튼이 보일 때까지 기다린다.
+    const categoriesRendered = await Core.waitFor(() => (
+      findClaimButton() || Core.gameElements('button[role="tab"]').some(
+        (tab) => Core.isElementVisible(tab) && !topTabs.has(tab.textContent.trim()))
+    ) ? true : null, 8000, 200, shouldCancel);
+    if (!categoriesRendered) Core.log('daily', '⚠ 업적: 8초 안에 카테고리 탭이 보이지 않음(화면 미표시 상태로 판정)');
 
     let claimed = 0;
     let visitedTabs = 0;
@@ -3875,6 +5534,13 @@
       return [...row.querySelectorAll('button')].find((button) =>
         Core.isElementVisible(button) && normalizedText(button) === '받기' && !button.disabled) || null;
     };
+    // 길드 화면 경로만 확인하고 바로 읽으면 보상 영역이 그려지기 전일 수 있다(2026-10-07 렌더링 감사).
+    // 명성 행 또는 받기 버튼이 보일 때까지 기다린다. 끝내 없으면 기존처럼 받을 것 없음으로 둔다.
+    const reputationRendered = await Core.waitFor(() => (
+      findClaimBtn() || Core.gameElements('p, span, div').some((element) =>
+        Core.isElementVisible(element) && normalizedText(element) === '마을 효과 명성')
+    ) ? true : null, 6000, 200, shouldCancel);
+    if (!reputationRendered) Core.log('daily', '⚠ 길드 마을효과 명성: 6초 안에 명성 행이 보이지 않음');
     const claimBtn = findClaimBtn();
     if (!claimBtn) {
       return { ok: true, skipped: true, verified: true, outcome: 'ALREADY_DONE', code: 'GUILD_TOWN_REPUTATION_NOT_AVAILABLE', message: '길드 마을효과 명성: 받을 것 없음(이미 받았거나 없음)' };
@@ -3955,6 +5621,12 @@
       return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'MAIL_PAGE_TIMEOUT', before: { unreadBadge: unreadCountAtStart }, message: '메일함: 화면 진입을 확인하지 못함' };
     }
     await Core.humanDelay(500, 900);
+    // 안 읽은 메일 배지가 있었으므로 메일 행이 보여야 한다. 행이 그려지기 전에 읽으면
+    // "처리 0건 완료"로 끝났다(2026-10-07 렌더링 감사).
+    const mailRowsRendered = await Core.waitFor(() => (
+      Core.gameElements('tr').some((tr) => tr.querySelector('td') && Core.isElementVisible(tr)) ? true : null
+    ), 8000, 200, shouldCancel);
+    if (!mailRowsRendered) Core.log('daily', `⚠ 메일함: 안 읽은 메일 ${unreadCountAtStart}개 표시였지만 8초 안에 메일 행이 보이지 않음`);
 
     let processed = 0;
     let claimedAttachments = 0;
@@ -4071,18 +5743,17 @@
         questShouldCancel
       );
 
-      // 주간 자동 보충은 수요일부터만 시작한다. 월/화는 아레나·낚시 등
-      // 아직 열리지 않은 주간 소유 기능이 남는 정상 구간이므로 주간을
-      // 억지로 완성하려 들지 않는다. 수요일 이후에도 목표는 8/8이 아니라
-      // 보상 기준 7/8이며, 세부 owner-day/threshold gate는 reconciliation이 소유한다.
+      // 주간 퀘스트는 토/일에만 확인한다. 기존 중간 아레나 단계가 모두
+      // 끝난 뒤 실제 진행/보상을 확인하며, 주간 부족분으로 아레나를 추가하지 않는다.
       if (!questShouldCancel() && this.weeklyQuestRecoveryDue()) {
-        await this.runQuestChoreReconciliation(
+        await runSubTask('주간 퀘스트 확인 및 보상', () => this.runQuestChoreReconciliation(
           runSubTask,
-          { daily: false, weekly: true },
+          { daily: false, weekly: true, fromDaily: true,
+            arenaRequired: this.config.arena === true, arenaObservation: this.lastArenaObservation },
           questShouldCancel
-        );
+        ));
       } else if (!questShouldCancel()) {
-        Core.log('daily', '주간 퀘스트 자동 보충: 수요일 전이므로 건너뜀');
+        Core.log('daily', '주간 퀘스트: 월~금에는 확인·보충·보상을 건너뜀');
       }
 
       const achievementResult = await runSubTask('업적 보상 확인', () => this.claimAchievementRewardsIfIndicated());
@@ -4140,10 +5811,20 @@
         : dungeonResult;
     }
     if (step === 'arena') {
-      const result = await Modules.arena.runUntilCompletion({
-        fromDaily: true,
-        shouldCancel: () => this.stopRequested || !Core.dailyActive,
-      });
+      let result;
+      try {
+        result = await Modules.arena.runUntilCompletion({
+          fromDaily: true,
+          shouldCancel: () => this.stopRequested || !Core.dailyActive,
+        });
+      } catch (error) {
+        this.recordArenaObservation({ ok: false, code: error.code || 'ARENA_INVOCATION_FAILED' });
+        throw error;
+      }
+      // Keep the newest structured normal Arena result.
+      // The page result owns its observation time; terminal time
+      // cannot turn a morning skip into an afternoon eligibility claim.
+      this.recordArenaObservation(result);
       if (result.stopped) throw new Error('사용자가 일일 실행을 정지했습니다.');
       if (!result.ok) {
         const error = new Error(result.message || result.code || '아레나 실행 실패');
@@ -4264,6 +5945,7 @@
         if (this.stopRequested) break;
         const detail = e && e.message ? e.message : String(e);
         if (this.isFatalAutoHuntOilRecoveryFailure(step, e) ||
+            this.isFatalBossClearReadinessFailure?.(step, e) ||
             this.isFatalWeeklyRewardVerificationFailure?.(step, e)) {
           const failure = {
             step,
@@ -4322,7 +6004,7 @@
         message: '사용자 요청으로 일일 연속 실행을 정지했습니다.',
         at: Date.now(),
       };
-      Core.showBanner('daily', '사용자 요청으로 일일 연속 실행을 정지했습니다.', false);
+      Core.showBanner('daily', '사용자 요청으로 일일 연속 실행을 정지했습니다.', false, 'stopped');
       return this.finalizeRun(result, state);
     }
 
@@ -4340,7 +6022,7 @@
         activityLog: Array.isArray(Core.dailyRunLog) ? Core.dailyRunLog.slice() : [],
         at: Date.now(),
       };
-      Core.showBanner('daily', '선택한 일일 작업을 모두 완료하고 사후 확인했습니다.', true);
+      Core.showBanner('daily', '선택한 일일 작업을 모두 완료하고 사후 확인했습니다.', true, 'success');
       Core.playCompleteSound();
     } else if (issues.length > 0) {
       Core.moduleResults.daily = {
@@ -4356,7 +6038,7 @@
         activityLog: Array.isArray(Core.dailyRunLog) ? Core.dailyRunLog.slice() : [],
         at: Date.now(),
       };
-      Core.showBanner('daily', `${issues.length}개 작업에서 이슈가 있었습니다. 일일 로그를 확인해주세요.`, false);
+      Core.showBanner('daily', `${issues.length}개 작업에서 이슈가 있었습니다. 일일 로그를 확인해주세요.`, false, 'issues');
       Core.playStopSound();
     } else {
       Core.moduleResults.daily = {
@@ -4368,7 +6050,7 @@
         activityLog: Array.isArray(Core.dailyRunLog) ? Core.dailyRunLog.slice() : [],
         at: Date.now(),
       };
-      Core.showBanner('daily', Core.moduleResults.daily.message, false);
+      Core.showBanner('daily', Core.moduleResults.daily.message, false, 'issues');
       Core.playStopSound();
     }
     alert(`일일 연속 실행 결과\n\n${summary || '실행한 작업 없음'}`);
@@ -4377,6 +6059,8 @@
 
   Modules.daily.finalizeRun = function (result, state = null) {
     const persisted = state || this.loadState();
+    const arenaObservation = this.lastArenaObservation || persisted?.arenaObservation;
+    if (arenaObservation) result.arenaObservation = arenaObservation;
     if (persisted) {
       persisted.running = false;
       this.saveState(persisted);
@@ -4455,8 +6139,8 @@
     // 하는 보상이기 때문). 일간 퀘스트(dailyQuests)는 다른 모든 단계가
     // 끝난 뒤에야 정확한 진행도를 확인할 수 있으므로 항상 맨 마지막에
     // 실행한다(매일). 이 단계 안에서도 일간을 먼저 완성·수령하고, 주간
-    // 자동 보충은 수요일~일요일에만 그 뒤에 실행한다. 월/화 주간 미완료는
-    // 아레나·낚시·길드보스 일정상 정상이며 억지로 8/8을 만들지 않는다.
+    // 점검·보상은 토/일에만 그 뒤에 실행한다. 월~금에는 주간을 확인하지
+    // 않고, 주간 부족분으로 낚시나 아레나를 추가 실행하지 않는다.
     // ⚠ 사용자 요청(2026-08): 매일 순서가 똑같으면 패턴이 뻔해서, "일일 작업
     // 순서 랜덤" 체크박스가 켜져 있으면 아래 중간 작업들만 실행마다 무작위로
     // 섞는다(weeklyRewards/attendance/dailyQuests는 진행도 확인 순서상
@@ -4502,7 +6186,12 @@
       return;
     }
     if (steps.includes('boss')) {
-      const checkedBosses = [...document.querySelectorAll('#lrm-boss-ref-panel .lrm-boss-check:checked')];
+      // 보스 패널 DOM은 보스 엔진이 소유한다. 패널이 없으면 공개 조회도 []를
+      // 돌려주므로, 저장된 선택만으로 시작을 허용하지 않는 기존 판정을 유지한다.
+      const bossEngine = window.__bossMacro;
+      const checkedBosses = bossEngine && typeof bossEngine.getPanelCheckedBossKeys === 'function'
+        ? bossEngine.getPanelCheckedBossKeys()
+        : [];
       if (checkedBosses.length === 0) {
         Core.showBanner('daily', '보스 탭에서 일일 실행할 보스를 하나 이상 체크해주세요.');
         rejectRecoveryStart('DAILY_BOSS_SELECTION_REQUIRED');
@@ -4516,6 +6205,7 @@
       reports: [],
       startedAt: Date.now(),
     };
+    mod.lastArenaObservation = null;
     mod.stopRequested = false;
     Core.dailyRunLog = [];
     Core.moduleResults.daily = { ok: null, stopped: false, message: '실행 중', at: Date.now() };
@@ -4602,19 +6292,16 @@
     if (Core.activeModuleId && Modules[Core.activeModuleId]) {
       Core.requestStopModule(Core.activeModuleId, { fromDailyStop: true });
     }
-    if (window.__bossMacro) {
-      if (typeof window.__bossMacro.clearBossRunState === 'function') {
-        if (typeof window.__bossMacro.requestImmediateStop === 'function') {
-          window.__bossMacro.requestImmediateStop();
-        } else {
-          window.__bossMacro.clearBossRunState();
-        }
-      } else {
-        window.__bossMacro.stopRequested = true;
-        localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
-        localStorage.removeItem('lrm-boss-ref-pending');
-        localStorage.removeItem('lrm-boss-ref-queue');
-      }
+    // 보스 실행 상태(정지 잠금·pending·queue·실행 허가)는 보스 엔진이 소유한다.
+    // Daily는 보스 공개 정지 함수만 호출하고 보스 저장 키를 직접 쓰거나 지우지
+    // 않는다. 같은 shared core 묶음의 보스 엔진은 두 함수를 항상 함께 제공한다.
+    const bossEngine = window.__bossMacro;
+    if (bossEngine && typeof bossEngine.requestImmediateStop === 'function') {
+      bossEngine.requestImmediateStop();
+    } else if (bossEngine && typeof bossEngine.clearBossRunState === 'function') {
+      bossEngine.clearBossRunState();
+    } else if (bossEngine) {
+      Core.log('daily', '⚠ 보스 엔진의 정지 기능을 찾지 못해 보스 정지를 요청하지 못했습니다.');
     }
   };
 
@@ -4622,7 +6309,7 @@
   // 좁은 공유 계약이다. 게임 로직이나 네트워크 호출은 이 표면에 복제하지
   // 않는다. 원격 start는 exact-session bridge가 발급한 명시 승인만 허용한다.
   const SHARED_CORE_ADAPTER_VERSION = '1.20.1';
-  const SHARED_CORE_RUNTIME_VERSION = '1.2.30-preset-live-staged';
+  const SHARED_CORE_RUNTIME_VERSION = '1.2.31-event-bundles';
   const EXECUTION_LEASE_KEY = 'lanis:shared-core:execution-lease:v1';
   const EXECUTION_WEB_LOCK_NAME = 'lanis:shared-core:single-executor:v1';
   const executionTabId = (() => {
@@ -4948,7 +6635,20 @@
         request.args?.enrollmentReceiptId !== session.enrollmentReceiptId) return null;
     return session;
   };
+  const eventAdapterServices = Object.freeze({
+    requireExpectedCharacter, acquireExecutionLease, releaseExecutionLease, publicLease,
+    runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
+  });
+  const eventAdapterEntries = EVENT_BUNDLE_REGISTRY.flatMap((bundle) =>
+    (bundle.runtimeAdapterModuleIds || []).map((moduleId) => {
+      const factory = Modules[moduleId]?.createOperatorAdapters;
+      if (typeof factory !== 'function') throw new Error('EVENT_OPERATOR_ADAPTER_UNAVAILABLE:' + bundle.id);
+      return factory(eventAdapterServices);
+    })
+  );
+  const eventAdapterMethods = Object.assign({}, ...eventAdapterEntries);
   const SharedCoreAdapter = Object.freeze({
+    ...eventAdapterMethods,
     version: SHARED_CORE_ADAPTER_VERSION,
     runtimeVersion: SHARED_CORE_RUNTIME_VERSION,
     getStatus() {
@@ -5491,123 +7191,6 @@
         releaseExecutionLease(leaseResult.lease.leaseId);
       }
     },
-    async runAutumnPunchKing(request = {}) {
-      const auth = request.authorization;
-      const authorized = !!(request.source === 'runtime-host' && auth &&
-        auth.schema === 'autumn-punch-king-runtime-explicit-v1' && auth.explicit === true &&
-        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
-        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
-        auth.runtimeVersion === SHARED_CORE_RUNTIME_VERSION && Number.isFinite(auth.issuedAt) &&
-        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
-      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
-      const identity = requireExpectedCharacter(request.expectedCharacter);
-      if (!identity.ok) return identity.result;
-      const leaseResult = await acquireExecutionLease({ owner: 'operator', job: 'autumn_punch_king', sessionId: auth.sessionId });
-      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: publicLease(leaseResult.lease), identity };
-      const shouldCancel = () => !!request.scope?.stopped;
-      try {
-        const message = await Modules.preseason.runPunchKingIfMissing(shouldCancel);
-        if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', identity };
-        const records = Modules.preseason.readPunchKingWeeklyRecords();
-        const verified = records && ['짚 허수아비', '강철 허수아비'].every((name) => Number.isFinite(records[name]) && records[name] > 0);
-        if (!verified) return { ok: false, code: 'AUTUMN_PUNCH_KING_VERIFY_FAILED', records, identity };
-        return { ok: true, verified: true, outcome: 'SUCCESS', message, records, identity };
-      } catch (error) {
-        if (shouldCancel() || error?.isUserStop) return { ok: true, stopped: true, code: 'STOPPED', identity };
-        return { ok: false, code: 'AUTUMN_PUNCH_KING_EXCEPTION', message: String(error?.message || error), identity };
-      } finally {
-        releaseExecutionLease(leaseResult.lease.leaseId);
-      }
-    },
-    async runAutumnDeepArena(request = {}) {
-      const auth = request.authorization;
-      const authorized = !!(request.source === 'runtime-host' && auth &&
-        auth.schema === 'autumn-deep-arena-runtime-explicit-v1' && auth.explicit === true &&
-        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
-        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
-        auth.runtimeVersion === SHARED_CORE_RUNTIME_VERSION && Number.isFinite(auth.issuedAt) &&
-        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
-      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
-      const identity = requireExpectedCharacter(request.expectedCharacter);
-      if (!identity.ok) return identity.result;
-      const leaseResult = await acquireExecutionLease({ owner: 'operator', job: 'autumn_deep_arena', sessionId: auth.sessionId });
-      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: publicLease(leaseResult.lease), identity };
-      const mod = Modules.preseason;
-      const loopPromise = Core.startModule('preseason');
-      if (!loopPromise) {
-        releaseExecutionLease(leaseResult.lease.leaseId);
-        return { ok: false, skipped: true, code: 'START_REJECTED_BY_CORE', identity };
-      }
-      const unsubscribe = request.scope?.onStop(() => Core.requestStopModule('preseason'));
-      try {
-        await loopPromise;
-        if (request.scope?.stopped) return { ok: true, stopped: true, code: 'STOPPED', cycleCount: mod.cycleCount, identity };
-        const coreResult = Core.moduleResults.preseason || null;
-        if (coreResult?.ok === false) return { ok: false, code: 'AUTUMN_DEEP_ARENA_CORE_FAILED', result: coreResult, identity };
-        const progress = mod.readAutumnTokenProgress();
-        const verified = progress && (
-          progress.today.current >= progress.today.max || progress.weekly.current >= progress.weekly.max
-        );
-        if (!verified) return { ok: false, code: 'AUTUMN_DEEP_ARENA_VERIFY_FAILED', progress, result: coreResult, cycleCount: mod.cycleCount, identity };
-        return { ok: true, verified: true, outcome: 'SUCCESS', progress, result: coreResult, cycleCount: mod.cycleCount, identity };
-      } finally {
-        unsubscribe?.();
-        releaseExecutionLease(leaseResult.lease.leaseId);
-      }
-    },
-    async runAutumnTokenUse(request = {}) {
-      const auth = request.authorization;
-      const authorized = !!(request.source === 'runtime-host' && auth &&
-        auth.schema === 'autumn-token-use-runtime-explicit-v1' && auth.explicit === true &&
-        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
-        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
-        auth.runtimeVersion === SHARED_CORE_RUNTIME_VERSION && Number.isFinite(auth.issuedAt) &&
-        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
-      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
-      const identity = requireExpectedCharacter(request.expectedCharacter);
-      if (!identity.ok) return identity.result;
-      const leaseResult = await acquireExecutionLease({ owner: 'operator', job: 'autumn_token_use', sessionId: auth.sessionId });
-      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: publicLease(leaseResult.lease), identity };
-      const shouldCancel = () => !!request.scope?.stopped;
-      try {
-        const usage = await Modules.preseason.useAutumnTokens(shouldCancel);
-        if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', identity };
-        if (!usage || usage.bounded !== true || usage.usedCycles > 30) return { ok: false, code: 'AUTUMN_TOKEN_USE_VERIFY_FAILED', usage, identity };
-        return { ok: true, verified: true, outcome: usage.usedCycles === 0 ? 'ALREADY_DONE' : 'SUCCESS', usage, identity };
-      } catch (error) {
-        if (shouldCancel() || error?.isUserStop) return { ok: true, stopped: true, code: 'STOPPED', identity };
-        return { ok: false, code: 'AUTUMN_TOKEN_USE_EXCEPTION', message: String(error?.message || error), identity };
-      } finally {
-        releaseExecutionLease(leaseResult.lease.leaseId);
-      }
-    },
-    async runAutumnBoardRewards(request = {}) {
-      const auth = request.authorization;
-      const authorized = !!(request.source === 'runtime-host' && auth &&
-        auth.schema === 'autumn-board-rewards-runtime-explicit-v1' && auth.explicit === true &&
-        auth.commandId === request.commandId && typeof auth.profileId === 'string' && auth.profileId &&
-        typeof auth.sessionId === 'string' && auth.sessionId && typeof auth.runId === 'string' && auth.runId &&
-        auth.runtimeVersion === SHARED_CORE_RUNTIME_VERSION && Number.isFinite(auth.issuedAt) &&
-        Date.now() - auth.issuedAt >= 0 && Date.now() - auth.issuedAt <= 30000);
-      if (!authorized) return { ok: false, skipped: true, code: 'EXPLICIT_AUTHORIZATION_REQUIRED' };
-      const identity = requireExpectedCharacter(request.expectedCharacter);
-      if (!identity.ok) return identity.result;
-      const leaseResult = await acquireExecutionLease({ owner: 'operator', job: 'autumn_board_rewards', sessionId: auth.sessionId });
-      if (!leaseResult.acquired) return { ok: false, skipped: true, code: 'ALREADY_RUNNING', existing: publicLease(leaseResult.lease), identity };
-      const shouldCancel = () => !!request.scope?.stopped;
-      try {
-        const message = await Modules.preseason.claimAutumnBoardRewards(shouldCancel);
-        if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', identity };
-        const progress = Modules.preseason.readAutumnBoardProgress();
-        if (!progress || progress.current !== progress.max || progress.max !== 15) return { ok: false, code: 'AUTUMN_BOARD_VERIFY_FAILED', progress, identity };
-        return { ok: true, verified: true, outcome: 'SUCCESS', message, progress, identity };
-      } catch (error) {
-        if (shouldCancel() || error?.isUserStop) return { ok: true, stopped: true, code: 'STOPPED', identity };
-        return { ok: false, code: 'AUTUMN_BOARD_EXCEPTION', message: String(error?.message || error), identity };
-      } finally {
-        releaseExecutionLease(leaseResult.lease.leaseId);
-      }
-    },
     async runRewardBoxes(request = {}) {
       const auth = request.authorization;
       const authorized = !!(request.source === 'runtime-host' && auth &&
@@ -5915,6 +7498,28 @@
       };
     },
   });
+  // Daily 저장 상태(DAILY_STATE_KEY/DAILY_AUTH_KEY)는 Daily가 소유한다. 보스 엔진은
+  // Chrome 폐기 탭 복원 때 "일일 실행이 보스 큐를 이어받는지"만 이 읽기 전용
+  // 조회로 묻고 Daily 키를 직접 읽지 않는다. 판정 의미는 기존 보스 측 판정과
+  // 같다: 두 값 중 하나라도 JSON 해석에 실패하면 둘 다 없는 것으로 보고,
+  // running이며 허가의 startedAt이 상태와 같을 때만 참이다(schema는 보지 않는다).
+  // normal 묶음이 보스 엔진보다 먼저 설치되므로 보스 복원 시점에 항상 존재한다.
+  // 페이지 전역 공개는 이 공개 표면 구역에만 둔다. 위쪽 모듈 정의 구역은 다른
+  // 기능 시험이 window 없이 단독 실행하므로 최상위 전역 부작용을 두지 않는다.
+  window.__lanisDailyRunQuery = Object.freeze({
+    ownsDiscardedBossQueue() {
+      let state = null;
+      let auth = null;
+      try {
+        state = JSON.parse(localStorage.getItem(DAILY_STATE_KEY) || 'null');
+        auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
+      } catch (e) {
+        state = null;
+        auth = null;
+      }
+      return !!(state && state.running && auth && auth.startedAt === state.startedAt);
+    },
+  });
   window.__lanisSharedCoreAdapter = SharedCoreAdapter;
   window.dispatchEvent(new CustomEvent('lanis:shared-core:ready', {
     detail: { adapterVersion: SHARED_CORE_ADAPTER_VERSION, runtimeVersion: SHARED_CORE_RUNTIME_VERSION },
@@ -6102,9 +7707,9 @@
   // "장인 정신" 진행도(N/M)를 확인해서, 이미 완료(N>=M)면 대장간에 아예
   // 가지 않고 스킵한다. 이렇게 하면 "일일"을 하루에 여러 번 돌려도 두 번째
   // 부터는 조합 자체를 시도하지 않는다.
-  Modules.daily.ensureQuestProgressTab = async function (tabLabel, shouldCancel = () => false) {
+  Modules.daily.ensureQuestProgressTab = async function (tabLabel, shouldCancel = () => false, clickOptions = {}) {
     if (shouldCancel()) return false;
-    await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
+    if (!location.pathname.startsWith('/quests')) await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
     const onPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300, shouldCancel);
     if (!onPage || shouldCancel()) return false;
     const findTab = () => Core.gameElements('[role="tab"]').find((tab) =>
@@ -6114,7 +7719,7 @@
     if (!tab) return false;
     if (tab.getAttribute('aria-selected') !== 'true') {
       const clicked = await Core.safeClick(findTab, {
-        beforeMin: 250, beforeMax: 450, afterMin: 350, afterMax: 550, shouldCancel,
+        beforeMin: 250, beforeMax: 450, afterMin: 350, afterMax: 550, ...clickOptions, shouldCancel,
       });
       if (!clicked) return false;
     }
@@ -6166,9 +7771,11 @@
     }
     await Core.humanDelay(500, 900);
 
-    const match = Core.bodyText().match(/대장간\s*이용\s*(\d+)\s*\/\s*(\d+)/);
+    // 탭 선택 직후 한 번만 읽으면 퀘스트 행이 그려지기 전이라 "항목 없음"으로 끝났다
+    // (2026-10-07 렌더링 감사). 행이 보일 때까지 기다린다.
+    const match = await Core.waitFor(() => Core.bodyText().match(/대장간\s*이용\s*(\d+)\s*\/\s*(\d+)/), 6000, 200, shouldCancel);
     if (!match) {
-      Core.log('daily', '⚠ "대장간 이용" 퀘스트 항목을 찾지 못했습니다.');
+      Core.log('daily', '⚠ "대장간 이용" 퀘스트 항목을 찾지 못했습니다(6초 대기).');
       return false;
     }
     if (parseInt(match[1], 10) >= parseInt(match[2], 10)) {
@@ -6217,6 +7824,11 @@
       const page = current && /^\d+$/.test(current.textContent.trim()) ? Number(current.textContent.trim()) : NaN;
       return Number.isSafeInteger(page) && page >= 1 ? page : null;
     };
+    // 탭·페이지 전환 직후 한 번만 읽으면 장비 목록이 그려지기 전이라 수리 버튼을 놓쳤다
+    // (2026-10-07 렌더링 감사). 페이지마다 잠깐 기다리고, 끝내 없을 때만 다음으로 넘어간다.
+    const findRepairButton = () => Core.gameElements('button').find((button) =>
+      Core.isElementVisible(button) && button.textContent.trim() === '수리' && !button.disabled
+    ) || null;
     for (const category of ['무기', '방어구', '장신구']) {
       if (shouldCancel()) return false;
       if (!(await selectTab(category))) {
@@ -6245,9 +7857,8 @@
           return false;
         }
         visited.add(currentPage);
-        const repairBtn = Core.gameElements('button').find((button) =>
-          Core.isElementVisible(button) && button.textContent.trim() === '수리' && !button.disabled
-        );
+        const repairBtn = await Core.waitFor(findRepairButton, 3000, 200, shouldCancel);
+        if (shouldCancel()) return false;
         if (repairBtn) {
           if (!(await Core.safeClick(() => repairBtn.isConnected ? repairBtn : null, {
             beforeMin: 500, beforeMax: 900, afterMin: 700, afterMax: 1100, shouldCancel,
@@ -6279,7 +7890,8 @@
     if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED' };
     const ready = await this.ensureQuestProgressTab('일간', shouldCancel);
     if (!ready) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'REPAIR_QUEST_VERIFY_PAGE_FAILED' };
-    const match = Core.bodyText().match(/대장간\s*이용\s*(\d+)\s*\/\s*(\d+)/);
+    const match = await Core.waitFor(() => Core.bodyText().match(/대장간\s*이용\s*(\d+)\s*\/\s*(\d+)/), 6000, 200, shouldCancel);
+    if (!match) Core.log('daily', '⚠ 수리 확인: 6초 안에 "대장간 이용" 퀘스트 행이 보이지 않음');
     if (!match) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'REPAIR_QUEST_PROGRESS_MISSING' };
     const progress = { current: parseInt(match[1], 10), target: parseInt(match[2], 10) };
     if (progress.current < progress.target) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'REPAIR_QUEST_INCOMPLETE', progress };
@@ -6312,6 +7924,12 @@
     // 필요하면 재시도한다.
     const setOnlyCategory = async (targetLabel) => {
       const categoryLabels = ['가죽', '결정', '상자', '해방', '던전', '일반'];
+      // 조합소 탭 클릭 직후에는 카테고리 버튼이 아직 없을 수 있다. 없으면 3회 시도가 대기 없이
+      // 끝나 "선택 실패"가 됐다(2026-10-07 렌더링 감사). 대상 버튼이 보일 때까지 기다린다.
+      const categoryRendered = await Core.waitFor(() => (
+        Core.gameElements('button').some((b) => b.textContent.trim() === targetLabel && Core.isElementVisible(b)) ? true : null
+      ), 6000, 200);
+      if (!categoryRendered) Core.log('daily', `⚠ 조합소 "${targetLabel}" 카테고리 버튼이 6초 안에 보이지 않음`);
       for (let attempt = 0; attempt < 3; attempt++) {
         let allCorrect = true;
         let targetFound = false;
@@ -6335,6 +7953,12 @@
       Core.log('daily', '⚠ 상자 카테고리 선택을 확인하지 못해 아이템 조합을 중단합니다.');
       return false;
     }
+    // 레시피 행이 그려지기 전에 읽으면 재료가 있어도 "조합 가능 없음"으로 넘어갔다(2026-10-07 렌더링 감사).
+    const recipeRowsVisible = () => (
+      Core.gameElements('tr').some((tr) => tr.querySelector('td') && Core.isElementVisible(tr)) ? true : null
+    );
+    const recipesRendered = await Core.waitFor(recipeRowsVisible, 6000, 200);
+    if (!recipesRendered) Core.log('daily', '⚠ 조합소 상자 레시피 목록이 6초 안에 보이지 않음');
 
     // 재료가 여러 경로(같은 완제품 이름의 서로 다른 레시피 행)로 존재할 수
     // 있다(예: "가죽끈"은 재료가 "가죽"인 행과 "낡은 가죽끈"인 행 둘 다 있음).
@@ -6416,6 +8040,7 @@
       return false;
     }
 
+    if (!(await Core.waitFor(recipeRowsVisible, 6000, 200))) Core.log('daily', '⚠ 조합소 가죽 레시피 목록이 6초 안에 보이지 않음');
     for (const label of ['고급 가죽끈', '가죽끈', '낡은 가죽끈']) {
       if (await tryCraft(label)) return true;
     }
@@ -6432,7 +8057,7 @@
       '장인 정신', '대장간 이용', '레어맵 탐험', '한가로운 낚시',
     ];
     if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED' };
-    await Core.clickNavMenuExact('캐릭', '퀘스트');
+    if (!location.pathname.startsWith('/quests')) await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
     const onPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300, shouldCancel);
     if (!onPage || shouldCancel()) {
       return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'DAILY_QUEST_PAGE_MISSING' };
@@ -6453,6 +8078,8 @@
     if (!selected || shouldCancel()) {
       return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_QUEST_TAB_NOT_SELECTED' };
     }
+    await this.waitForQuestRows(labels, shouldCancel);
+    if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED' };
 
     const progress = {};
     const issues = [];
@@ -6499,8 +8126,7 @@
   };
 
   // 주간 퀘스트의 목표는 8/8 완성이 아니라 보상 수령 조건인 7/8이다.
-  // 월/화에는 아직 열리지 않은 주간 소유 기능이 정상적으로 남으므로 자동
-  // 보충을 시작하지 않는다. 수요일부터만 부족분을 보며, owner 운영일과
+  // 월~금에는 주간 점검을 하지 않는다. 토/일에만 부족분을 보며, owner 운영일과
   // 7/8 threshold를 통과한 행동만 허용한다.
   Modules.daily.weeklyQuestCompletedCount = function (audit) {
     if (!this.questAuditReadable(audit)) return 0;
@@ -6510,17 +8136,21 @@
   };
 
   Modules.daily.weeklyQuestRewardEligible = function (audit) {
-    return this.weeklyQuestCompletedCount(audit) >= 7;
+    if (!this.questAuditReadable(audit)) return false;
+    const guild = audit.progress['길드의 용사'];
+    return !!(guild && Number.isInteger(guild.current) && Number.isInteger(guild.target) &&
+      guild.target > 0 && guild.current >= guild.target &&
+      this.weeklyQuestCompletedCount(audit) >= 7);
   };
 
   Modules.daily.weeklyQuestRecoveryDue = function (kstDay = Core.getKstDayOfWeek()) {
-    return [0, 3, 4, 5, 6].includes(kstDay); // 일, 수~토
+    return [0, 6].includes(kstDay); // 토/일만 점검·보충·보상
   };
 
   Modules.daily.weeklyQuestOwnerDue = function (label, kstDay = Core.getKstDayOfWeek()) {
-    if (label === '아레나 도전자') return [0, 6].includes(kstDay); // 토/일
+    if (label === '아레나 도전자') return false; // 기존 아레나 실행만 사용; 주간 부족분 재실행 없음
     if (label === '길드의 용사') return [2, 4].includes(kstDay); // 화/목
-    if (label === '낚시광') return [0, 3, 4, 5, 6].includes(kstDay); // 수~일
+    if (label === '낚시광') return false; // 주간 보충 낚시 없음; 일간·수동 낚시는 유지
     return true;
   };
 
@@ -6637,8 +8267,24 @@
     scopes = { daily: true, weekly: true },
     shouldCancel = () => this.stopRequested || !Core.dailyActive
   ) {
-    let dailyAudit = scopes.daily ? await this.auditDailyQuestProgress(shouldCancel) : null;
-    let weeklyAudit = scopes.weekly ? await this.auditWeeklyQuestProgress(shouldCancel) : null;
+    // Gate before any weekly read, including standalone/mixed-scope callers.
+    scopes = { ...scopes, weekly: scopes.weekly && this.weeklyQuestRecoveryDue() };
+    if (!scopes.daily && !scopes.weekly) return {
+      ok: true, skipped: true, verified: true, outcome: 'NOT_DUE', code: 'WEEKLY_QUEST_NOT_DUE',
+      finalDaily: null, finalWeekly: null,
+    };
+    const reuse = this.createQuestAuditReuseContext();
+    try {
+    const auditScope = async (tabLabel, previous) => {
+      if (shouldCancel()) { reuse.invalidate(); return previous; }
+      if (reuse.valid(previous, tabLabel)) return previous;
+      const audit = await (tabLabel === '일간'
+        ? this.auditDailyQuestProgress(shouldCancel) : this.auditWeeklyQuestProgress(shouldCancel));
+      if (!this.questAuditReadable(audit)) reuse.invalidate();
+      return reuse.remember(audit, tabLabel);
+    };
+    let dailyAudit = scopes.daily ? await auditScope('일간', null) : null;
+    let weeklyAudit = scopes.weekly ? await auditScope('주간', null) : null;
 
     const dailyReadable = !scopes.daily || this.questAuditReadable(dailyAudit);
     const weeklyReadable = !scopes.weekly || this.questAuditReadable(weeklyAudit);
@@ -6655,9 +8301,6 @@
     const dailyMissing = (label) => scopes.daily && this.questMissing(dailyAudit, label);
     const weeklyMissing = (label) =>
       scopes.weekly && weeklyRecoveryEnabled && this.questMissing(weeklyAudit, label);
-    if (scopes.weekly && !weeklyRecoveryEnabled) {
-      Core.log('daily', '주간 퀘스트 자동 보충: 수요일 전이므로 진행도만 확인하고 복구 행동은 하지 않음');
-    }
     const ownerStep = async (label, step, code) => runSubTask(label, async () => {
       const detail = await this.runStep(step);
       return { ok: true, verified: true, outcome: 'SUCCESS', code, detail };
@@ -6669,8 +8312,11 @@
 
     const reconcileDaily = async (label, subTaskLabel, recover) => {
       if (!dailyMissing(label)) return null;
+      dailyAudit = await auditScope('일간', dailyAudit);
+      if (!dailyMissing(label)) return null;
       return await runSubTask(subTaskLabel, () => this.reconcileQuestRequirement({
         tabLabel: '일간',
+        audit: dailyAudit, reuse,
         label,
         shouldCancel,
         recover,
@@ -6678,32 +8324,35 @@
     };
     const reconcileWeekly = async (label, subTaskLabel, recover) => {
       if (!weeklyMissing(label) || this.weeklyQuestRewardEligible(weeklyAudit)) return null;
+      weeklyAudit = await auditScope('주간', weeklyAudit);
+      if (!weeklyMissing(label) || this.weeklyQuestRewardEligible(weeklyAudit)) return null;
       if (!this.weeklyQuestOwnerDue(label)) {
         Core.log('daily', `주간 퀘스트 ${label}: 오늘은 소유 기능 운영일이 아니므로 자동 보충하지 않음`);
         return null;
       }
       const result = await runSubTask(subTaskLabel, () => this.reconcileQuestRequirement({
         tabLabel: '주간',
+        audit: weeklyAudit, reuse,
         label,
         shouldCancel,
         recover,
       }));
       if (!shouldCancel()) {
-        const refreshed = await this.auditWeeklyQuestProgress(shouldCancel);
-        if (this.questAuditReadable(refreshed)) weeklyAudit = refreshed;
+        const refreshed = await auditScope('주간', weeklyAudit);
+        weeklyAudit = refreshed;
       }
       return result;
     };
     const refreshDailyAudit = async () => {
       if (!scopes.daily || shouldCancel()) return dailyAudit;
-      const refreshed = await this.auditDailyQuestProgress(shouldCancel);
-      if (this.questAuditReadable(refreshed)) dailyAudit = refreshed;
+      const refreshed = await auditScope('일간', dailyAudit);
+      dailyAudit = refreshed;
       return refreshed;
     };
     const refreshWeeklyAudit = async () => {
       if (!scopes.weekly || shouldCancel()) return weeklyAudit;
-      const refreshed = await this.auditWeeklyQuestProgress(shouldCancel);
-      if (this.questAuditReadable(refreshed)) weeklyAudit = refreshed;
+      const refreshed = await auditScope('주간', weeklyAudit);
+      weeklyAudit = refreshed;
       return refreshed;
     };
 
@@ -6719,11 +8368,6 @@
     await reconcileWeekly('던전 정복자', '던전 정복자 숙제 복구', async () => {
       const detail = await this.runStep('dungeon');
       return { ok: true, verified: true, outcome: 'SUCCESS', code: 'QUEST_DUNGEON_OWNER_RERUN', detail };
-    });
-
-    await reconcileWeekly('아레나 도전자', '아레나 도전자 숙제 복구', async () => {
-      const detail = await this.runStep('arena');
-      return { ok: true, verified: true, outcome: 'SUCCESS', code: 'QUEST_ARENA_OWNER_RERUN', detail };
     });
 
     await reconcileWeekly('개인 보스 사냥꾼', '개인 보스 주간 숙제 복구', async () => {
@@ -6753,10 +8397,6 @@
       await this.runCultivationQuestJob(shouldCancel)
     );
 
-    await reconcileWeekly('낚시광', '낚시광 숙제 복구', async () =>
-      await this.runWeeklyFishingQuestWithDiagnostics(shouldCancel)
-    );
-
     await reconcileWeekly('길드의 용사', '길드 보스 숙제 복구', async () => {
       const detail = await this.runCoreModule('guildboss');
       return { ok: true, verified: true, outcome: 'SUCCESS', code: 'QUEST_GUILDBOSS_OWNER_RERUN', detail };
@@ -6767,8 +8407,8 @@
 
     // 위 숙제들이 일반 전투/승리 횟수도 자연스럽게 올렸을 수 있다.
     // 따라서 여기서 다시 읽은 뒤 마지막 부족분만 사냥으로 보충한다.
-    if (scopes.daily) dailyAudit = await this.auditDailyQuestProgress(shouldCancel);
-    if (scopes.weekly) weeklyAudit = await this.auditWeeklyQuestProgress(shouldCancel);
+    if (scopes.daily) dailyAudit = await auditScope('일간', dailyAudit);
+    if (scopes.weekly) weeklyAudit = await auditScope('주간', weeklyAudit);
     if ((scopes.daily && !this.questAuditReadable(dailyAudit)) ||
         (scopes.weekly && !this.questAuditReadable(weeklyAudit))) {
       if (scopes.daily && !this.questAuditReadable(dailyAudit)) {
@@ -6787,16 +8427,23 @@
     // 않는다. 이미 다른 6개를 완료해 이 한 항목만 채우면 보상 기준 7/8에
     // 도달하는 경우에만 마지막 filler로 허용한다. 그 전에는 활력 포션을
     // 소비할 이유가 없으며 자연 주간 진행을 기다린다.
+    const weeklyBattle = weeklyAudit?.progress?.['주간 전투왕'];
+    const rewardAfterBattle = weeklyBattle && this.weeklyQuestRewardEligible({
+      ...weeklyAudit,
+      progress: { ...weeklyAudit.progress, '주간 전투왕': { ...weeklyBattle, current: weeklyBattle.target } },
+    });
     const weeklyBattleNeeded =
       scopes.weekly &&
       weeklyRecoveryEnabled &&
       !this.weeklyQuestRewardEligible(weeklyAudit) &&
       this.weeklyQuestCompletedCount(weeklyAudit) >= 6 &&
+      rewardAfterBattle &&
       this.questMissing(weeklyAudit, '주간 전투왕');
     const battleMissing =
       (scopes.daily && (this.questMissing(dailyAudit, '일일 전투') || this.questMissing(dailyAudit, '승리의 맛'))) ||
       weeklyBattleNeeded;
     if (battleMissing) {
+      reuse.invalidate();
       await runSubTask('전투 숙제 부족분 복구', () => this.runBattleQuestRecovery({
         dailyAudit: scopes.daily ? dailyAudit : null,
         weeklyAudit: weeklyBattleNeeded ? weeklyAudit : null,
@@ -6809,10 +8456,10 @@
     }
 
     const finalDaily = scopes.daily
-      ? await runSubTask('일간 8개 숙제 최종 확인', () => this.auditDailyQuestProgress(shouldCancel))
+      ? await runSubTask('일간 8개 숙제 최종 확인', () => auditScope('일간', dailyAudit))
       : null;
     const finalWeekly = scopes.weekly
-      ? await runSubTask('주간 8개 숙제 최종 확인', () => this.auditWeeklyQuestProgress(shouldCancel))
+      ? await runSubTask('주간 8개 숙제 최종 확인', () => auditScope('주간', weeklyAudit))
       : null;
 
     // 일간 보상은 "8개 모두 완료"가 아니라 게임 화면의 실제 보상 control이
@@ -6821,29 +8468,51 @@
     // 확인하고, runQuestRewardJob이 활성/비활성 control을 기준으로 수령 여부를
     // 최종 결정하게 한다. 판독 자체가 실패한 경우에는 계속 fail-closed 한다.
     if (scopes.daily && finalDaily?.ok && finalDaily?.verified) {
-      await runSubTask('일간 보상 수령', () => this.runQuestRewardJob('일간', shouldCancel));
+      await runSubTask('일간 보상 수령', () => this.runQuestRewardJob('일간', shouldCancel, reuse));
     }
     // 주간도 일간과 동일하게 실제 보상 control이 권위다. 주간 역시
     // 8개 중 7개 완료에서 보상 수령이 가능하므로, 최종 진행도 판독이
     // 정상이라면 INCOMPLETE(7/8) 상태에서도 보상 control을 확인한다.
+    const arenaObservation = scopes.fromDaily ? scopes.arenaObservation : null;
+    const arenaUnverified = scopes.fromDaily && (
+      (scopes.arenaRequired && !arenaObservation) ||
+      (arenaObservation && (arenaObservation.stopped ||
+        ['RUNNING', 'UNKNOWN'].includes(arenaObservation.state)))
+    );
+    let weeklyReward = null;
     if (
-      scopes.weekly &&
-      finalWeekly?.ok &&
-      finalWeekly?.verified &&
-      this.weeklyQuestRewardEligible(finalWeekly)
+      scopes.weekly && !arenaUnverified &&
+      finalWeekly?.ok && finalWeekly?.verified && this.weeklyQuestRewardEligible(finalWeekly)
     ) {
-      await runSubTask('주간 보상 수령', () => this.runWeeklyQuestRewardWithRecheck(shouldCancel));
+      weeklyReward = await runSubTask('주간 보상 수령', () => this.runWeeklyQuestRewardWithRecheck(shouldCancel, { audit: finalWeekly, reuse }));
     } else if (scopes.weekly && finalWeekly?.ok && finalWeekly?.verified) {
       Core.log(
         'daily',
-        `주간 퀘스트: 보상 기준 미달 ${this.weeklyQuestCompletedCount(finalWeekly)}/8 — 다음 운영일 진행을 기다림`
+        arenaUnverified
+          ? `주간 퀘스트: 기존 아레나 완료 미확인 (${arenaObservation?.code || '관찰 없음'}) — 보상 수령 보류`
+          : `주간 퀘스트: 보상 기준 미달 ${this.weeklyQuestCompletedCount(finalWeekly)}/8 — 다음 운영일 진행을 기다림`
       );
     }
 
+    if (shouldCancel() || weeklyReward?.stopped) return {
+      ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED',
+      finalDaily, finalWeekly, weeklyReward, arenaObservation,
+    };
+    if (scopes.weekly && (arenaUnverified || !this.weeklyQuestRewardEligible(finalWeekly) ||
+        weeklyReward?.ok !== true || weeklyReward?.verified !== true)) {
+      return {
+        ok: true, verified: false, outcome: 'INCOMPLETE',
+        code: arenaUnverified ? 'WEEKLY_QUEST_ARENA_UNVERIFIED'
+          : !this.weeklyQuestRewardEligible(finalWeekly) ? 'WEEKLY_QUEST_PREREQUISITE_UNMET'
+            : 'WEEKLY_QUEST_REWARD_UNVERIFIED',
+        finalDaily, finalWeekly, weeklyReward, arenaObservation,
+      };
+    }
     return {
       ok: true, verified: true, outcome: 'SUCCESS', code: 'QUEST_CHORE_RECONCILIATION_RAN',
-      finalDaily, finalWeekly,
+      finalDaily, finalWeekly, weeklyReward, arenaObservation,
     };
+    } finally { reuse.close(); }
   };
 
   Modules.daily.runDailyQuestTasks = async function (
@@ -6863,14 +8532,14 @@
   // 감안해 남은 횟수(목표-현재)만 정확히 채운다(실전 확인: 5회 실행 시
   // 숙련도 정확히 1,800×5 소모, 퀘스트 진행도 5/5로 정확히 반영됨).
   Modules.daily.completeCultivationQuestIfNeeded = async function (shouldCancel = () => false) {
-    const requirement = await this.readQuestRequirement('주간', '꾸준핀 수행', shouldCancel);
+    const requirement = await this.readQuestRequirement('주간', '꾸준한 수행', shouldCancel);
     if (requirement?.stopped || !requirement?.ok || !requirement?.verified || !requirement?.progress) {
-      Core.log('daily', '⚠ "꾸준핀 수행" 퀘스트 진행도를 구조적으로 확인하지 못했습니다.');
+      Core.log('daily', '⚠ "꾸준한 수행" 퀘스트 진행도를 구조적으로 확인하지 못했습니다.');
       return false;
     }
     const { current, target } = requirement.progress;
     if (current >= target) {
-      Core.log('daily', '"꾸준핀 수행" 퀘스트 이미 완료됨 - 생략');
+      Core.log('daily', '"꾸준한 수행" 퀘스트 이미 완료됨 - 생략');
       return true;
     }
     const remaining = target - current;
@@ -6944,7 +8613,7 @@
 
   Modules.daily.readFishingQuestProgress = async function (tabLabel, label, shouldCancel = () => false) {
     if (shouldCancel()) return null;
-    await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
+    if (!location.pathname.startsWith('/quests')) await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
     const arrived = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300, shouldCancel);
     if (!arrived || shouldCancel()) return null;
     const findTab = () => Core.gameElements('[role="tab"]').find((tab) =>
@@ -6960,6 +8629,10 @@
       6000, 200, shouldCancel
     );
     if (!selected || shouldCancel()) return null;
+    // 낚시터에서 돌아온 직후엔 행이 아직 렌더링 전이라 판독이 null이 됐다(2026-10-07 수면양말:
+    // 낚시 완료 후 DAILY_FISHING_VERIFY_MISSING). 퀘스트 판독과 같은 행 대기를 쓴다.
+    await this.waitForQuestRows([label], shouldCancel);
+    if (shouldCancel()) return null;
     const reading = this.readQuestProgressRow(label);
     return reading.count === 1 && reading.valid ? reading.progress : null;
   };
@@ -6967,7 +8640,7 @@
   Modules.daily.goToFishingQuestGround = async function (fishingTown, shouldCancel = () => false) {
     if (shouldCancel()) return { stopped: true };
     const onTargetGround = () => location.pathname.startsWith('/fishing') &&
-      Core.bodyText().includes(`${fishingTown} 낚시터`);
+      Core.bodyText().replace(/\s+/g, ' ').includes(`${fishingTown} 낚시터`);
     if (!onTargetGround()) {
       await Core.ensureAtTown(fishingTown, 'daily');
       if (shouldCancel()) return { stopped: true };
@@ -7000,32 +8673,41 @@
   };
 
   Modules.daily.readFishingGroundState = function () {
-    const buttons = Core.gameElements('button').filter((button) => Core.isElementVisible(button));
+    const rawButtons = Core.gameElements('button');
+    const buttons = rawButtons.filter((button) => Core.isElementVisible(button));
     const label = (button) => button.textContent.trim().replace(/\s+/g, ' ');
     const only = (predicate) => {
       const matches = buttons.filter(predicate);
       return matches.length === 1 ? matches[0] : null;
     };
-    const count = (predicate) => buttons.filter(predicate).length;
+    const count = (predicate) => rawButtons.filter(predicate).length;
     const enabled = (button) => button && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
     const castLabel = (button) => label(button) === '🎣 낚시하기';
+    const cooldownLabel = (button) => /^⏱\s*\d+초$/.test(label(button));
     const installLabel = (button) => label(button) === '통발 설치하기';
     const installedLabel = (button) => label(button) === '통발 설치 중';
     const collectLabel = (button) => label(button) === '통발 수거하기';
+    const recognized = [castLabel, cooldownLabel, installLabel, installedLabel, collectLabel];
+    if (rawButtons.some((button) => !Core.isElementVisible(button) &&
+      recognized.some((predicate) => predicate(button)))) {
+      return { state: 'UNKNOWN', reason: 'HIDDEN_CONTROLS' };
+    }
     const cast = only(castLabel);
+    const cooldown = only(cooldownLabel);
     const install = only(installLabel);
     const installed = only(installedLabel);
     const collect = only(collectLabel);
-    if ([castLabel, installLabel, installedLabel, collectLabel].some((predicate) => count(predicate) > 1)) {
+    if ([castLabel, cooldownLabel, installLabel, installedLabel, collectLabel].some((predicate) => count(predicate) > 1)) {
       return { state: 'UNKNOWN', reason: 'DUPLICATE_CONTROLS' };
     }
-    if (enabled(cast) && enabled(install) && !installed && !collect) return { state: 'ABSENT', cast };
-    if (cast && !enabled(cast) && enabled(install) && !installed && !collect) return { state: 'CAST_COOLDOWN' };
-    if (!cast && !install && installed && !enabled(installed) && collect) {
+    if (cast && cooldown) return { state: 'UNKNOWN', reason: 'DUPLICATE_CONTROLS' };
+    if (enabled(cast) && enabled(install) && !cooldown && !installed && !collect) return { state: 'ABSENT', cast };
+    if (cooldown && !enabled(cooldown) && !cast && enabled(install) && !installed && !collect) return { state: 'CAST_COOLDOWN', cooldownRemainingMs: Number(label(cooldown).match(/\d+/)[0]) * 1000 };
+    if (!cast && !cooldown && !install && installed && !enabled(installed) && collect) {
       return enabled(collect) ? { state: 'COLLECT_READY', collect } : { state: 'INSTALLED_NOT_READY' };
     }
     return { state: 'UNKNOWN', reason: 'CONTROL_COMBINATION', controls: {
-      cast: !!cast, install: !!install, installed: !!installed, collect: !!collect,
+      cast: !!cast, cooldown: !!cooldown, install: !!install, installed: !!installed, collect: !!collect,
     } };
   };
 
@@ -7033,7 +8715,19 @@
     const ground = await this.goToFishingQuestGround(fishingTown, shouldCancel);
     if (!ground.ok) return ground;
     if (shouldCancel()) return { stopped: true };
-    const state = this.readFishingGroundState();
+    // 낚시터 제목만 보고 바로 읽으면 낚시·통발 버튼이 그려지기 전이라 UNKNOWN으로 실패했다
+    // (2026-10-07 렌더링 감사). 인식 가능한 버튼 조합이 보일 때까지 기다린다. 끝내 UNKNOWN이면
+    // 기존처럼 FISHING_GROUND_STATE_UNKNOWN으로 멈춘다.
+    let state = this.readFishingGroundState();
+    if (state.state === 'UNKNOWN') {
+      const rendered = await Core.waitFor(() => {
+        const current = this.readFishingGroundState();
+        return current.state === 'UNKNOWN' ? null : current;
+      }, 6000, 250, shouldCancel);
+      if (shouldCancel()) return { stopped: true };
+      if (rendered) state = rendered;
+      else Core.log('daily', `⚠ 낚시터 버튼 상태를 6초 안에 판정하지 못함(${state.reason || '미확인'})`);
+    }
     if (state.state === 'ABSENT') return { ok: true, collected: false };
     if (state.state === 'CAST_COOLDOWN') {
       const castReady = await Core.waitFor(() => this.readFishingGroundState().state === 'ABSENT' ? true : null,
@@ -7080,48 +8774,158 @@
       );
       return buttons.length === 1 ? buttons[0] : null;
     };
-    const findStop = () => exactButton('낚시 멈추기');
-    const findCast = () => exactButton('🎣 낚시하기');
-    if (findStop()) return { ok: false, code: 'FISHING_CAST_CONTROL_UNAVAILABLE' };
-    const castReady = await Core.waitFor(() => findStop() ? { blocked: true } : findCast(),
+    const stopCandidates = () => Core.gameElements('button').filter((button) =>
+      button.textContent.trim().replace(/\s+/g, ' ') === '낚시 멈추기'
+    );
+    const onTargetGround = () => location.pathname.startsWith('/fishing') &&
+      Core.bodyText().replace(/\s+/g, ' ').includes(`${fishingTown} 낚시터`);
+    const findStop = () => onTargetGround() && stopCandidates().length === 1
+      ? exactButton('낚시 멈추기') : null;
+    const findCast = () => onTargetGround() && stopCandidates().length === 0 &&
+      this.readFishingGroundState().state === 'ABSENT' ? exactButton('🎣 낚시하기') : null;
+    // Missing/disabled/hidden/duplicate stop controls are never proof that a
+    // session ended. Require the exact ground and returned cast controls across
+    // three observations, including the normal disabled cooldown control.
+    let settledCooldown = null;
+    const settledEnd = () => {
+      let observations = 0;
+      return () => {
+        const state = onTargetGround() && stopCandidates().length === 0 ? this.readFishingGroundState() : null;
+        observations = state && ['ABSENT', 'CAST_COOLDOWN'].includes(state.state) ? observations + 1 : 0;
+        if (observations < 3) return null;
+        settledCooldown = { state: state.state, remainingMs: state.state === 'CAST_COOLDOWN'
+          ? state.cooldownRemainingMs : 0, observedAt: Date.now() };
+        return true;
+      };
+    };
+    const uncertainEnd = (code) => {
+      if (Core.dailyActive) {
+        this.stopRequested = true;
+        Core.log('daily', `낚시 결과 또는 세션 종료를 확인하지 못해 일일 실행을 정지합니다: ${code}`);
+      }
+      return { ok: false, stopped: true, verified: false,
+        outcome: 'UNKNOWN', code, cast: true, townName: fishingTown };
+    };
+    if (stopCandidates().length) return { ok: false, code: 'FISHING_CAST_CONTROL_UNAVAILABLE' };
+    const castReady = await Core.waitFor(() => stopCandidates().length ? { blocked: true } : findCast(),
       castTimeoutMs, 500, shouldCancel);
     if (shouldCancel()) return { stopped: true };
-    if (!castReady || castReady.blocked) return { ok: false, code: 'FISHING_CAST_CONTROL_UNAVAILABLE' };
-    if (!(await Core.safeClick(findCast, {
-      beforeMin: 0, beforeMax: 0, afterMin: 0, afterMax: 0, shouldCancel,
-    }))) return { ok: false, code: 'FISHING_CAST_CLICK_FAILED' };
-    // A cast owns a roughly 30-second automatic fishing session. The quest is
-    // credited only after that session finishes naturally; clicking "낚시 멈추기"
-    // immediately would cancel the catch and synthetic click-credit is not evidence.
-    const stop = await Core.waitFor(findStop, 6000, 150, () => false);
-    if (!stop) {
-      // Do not navigate away while an unobserved cast may still be running. Wait for
-      // the cast control to return before reporting that the start transition was not
-      // observable. This is cleanup-by-observation only; no second cast is attempted.
-      await Core.waitFor(findCast, 45000, 250, () => false);
-      return { ok: false, code: 'FISHING_STOP_CONTROL_MISSING' };
+    if (!castReady || castReady.blocked) {
+      const state = this.readFishingGroundState();
+      return { ok: false, code: 'FISHING_CAST_CONTROL_UNAVAILABLE', readiness: {
+        timeoutMs: castTimeoutMs, observedAt: Date.now(), pathname: location.pathname,
+        state: state.state, cooldownRemainingMs: state.cooldownRemainingMs ?? null,
+      } };
     }
-    const completion = await Core.waitFor(() => {
-      if (!findStop()) return { completed: true };
-      if (shouldCancel()) return { cancelled: true };
-      return null;
-    }, 45000, 250, () => false);
-    if (completion?.completed) {
-      return { ok: true, cast: true, completed: true, stopped: false, townName: fishingTown };
-    }
-    // Cancellation or timeout: stop only the exact session started above, then verify
-    // that the stop control disappeared before any caller is allowed to navigate.
-    if (findStop()) {
+    // Snapshot alert identities immediately before this owned input. The game
+    // enables STOP even after a rejected POST, so STOP is not an acceptance witness.
+    const seenAlerts = new Set(Core.gameElements('[role="alert"]'));
+    const capturedAlerts = new Map();
+    const notificationEvidence = [];
+    const captureOutcome = () => {
+      if (!onTargetGround()) return;
+      for (const alert of Core.gameElements('[role="alert"]')) {
+        if (seenAlerts.has(alert)) continue;
+        const message = (alert.querySelector?.('.MuiAlert-message')?.textContent || alert.textContent)
+          .trim().replace(/\s+/g, ' ');
+        const classes = String(alert.className || '');
+        const severity = classes.match(/MuiAlert-(?:(?:standard|filled|outlined)|color)(Error|Success|Info|Warning)\b/)?.[1] || '';
+        const captured = capturedAlerts.get(alert);
+        if (captured) {
+          if (captured.message !== message || captured.severity !== severity) {
+            notificationEvidence.push({ outcome: 'AMBIGUOUS', message,
+              previousMessage: captured.message, previousSeverity: captured.severity, severity });
+            capturedAlerts.set(alert, { message, severity });
+          }
+          continue;
+        }
+        if (!message) continue;
+        if (!Core.isElementVisible(alert)) { seenAlerts.add(alert); continue; }
+        const isError = severity === 'Error';
+        let outcome = null;
+        if (message === '물고기를 낚았습니다!') outcome = isError ? 'AMBIGUOUS' : 'CAUGHT';
+        else if (message === '아무것도 낚지 못했습니다.') outcome = isError ? 'AMBIGUOUS' : 'ACCEPTED_EMPTY';
+        else if (/낚시/.test(message)) outcome = isError ? 'EXPLICIT_ERROR' : 'UNOBSERVED';
+        if (outcome) {
+          capturedAlerts.set(alert, { message, severity });
+          notificationEvidence.push({ outcome, message, severity });
+        } else {
+          // Baseline/unrelated nodes stay excluded; known result nodes remain
+          // observable so a later text or severity contradiction cannot be lost.
+          seenAlerts.add(alert);
+        }
+      }
+    };
+    const observer = typeof MutationObserver === 'function' && document.body
+      ? new MutationObserver((records) => {
+        // Mutation records preserve unrelated text replaced before delivery of
+        // the observer callback; a final rewritten message cannot become proof.
+        for (const record of records) {
+          const target = record.target?.nodeType === 3 ? record.target.parentElement : record.target;
+          const messageNode = target?.closest?.('.MuiAlert-message');
+          const alert = record.type === 'attributes' ? target?.closest?.('[role="alert"]')
+            : messageNode?.closest?.('[role="alert"]');
+          if (!alert || seenAlerts.has(alert)) continue;
+          const captured = capturedAlerts.get(alert);
+          if (record.type === 'attributes') {
+            const previousSeverity = String(record.oldValue || '')
+              .match(/MuiAlert-(?:(?:standard|filled|outlined)|color)(Error|Success|Info|Warning)\b/)?.[1] || '';
+            if (record.target === alert && captured && previousSeverity !== captured.severity) {
+              notificationEvidence.push({ outcome: 'AMBIGUOUS', message: captured.message, previousSeverity });
+            }
+            continue;
+          }
+          const previous = (record.oldValue || [...(record.removedNodes || [])]
+            .map((node) => node.textContent || '').join(' ')).trim().replace(/\s+/g, ' ');
+          if (captured) {
+            if (previous && previous !== captured.message) {
+              notificationEvidence.push({ outcome: 'AMBIGUOUS', message: previous });
+            }
+            continue;
+          }
+          if (previous && !/^(물고기를 낚았습니다!|아무것도 낚지 못했습니다\.)$/.test(previous) &&
+            !/낚시/.test(previous)) seenAlerts.add(alert);
+        }
+        captureOutcome();
+      }) : null;
+    try {
+      observer?.observe(document.body, { childList: true, subtree: true, characterData: true, characterDataOldValue: true,
+        attributes: true, attributeOldValue: true, attributeFilter: ['class'] });
+      if (!(await Core.safeClick(findCast, {
+        beforeMin: 0, beforeMax: 0, afterMin: 0, afterMax: 0, shouldCancel,
+      }))) return { ok: false, code: 'FISHING_CAST_CLICK_FAILED' };
+      // Stop the owned continuous mode once after its first callback settles.
+      const stop = await Core.waitFor(() => { captureOutcome(); return findStop(); }, 6000, 150, () => false);
+      if (!stop) {
+        const observeEnd = settledEnd();
+        const ended = await Core.waitFor(() => { captureOutcome(); return observeEnd(); }, 45000, 250, () => false);
+        if (!ended) return { ...uncertainEnd('FISHING_SESSION_END_UNVERIFIED'), notificationEvidence };
+        if (shouldCancel()) return { ok: true, stopped: true, cancelled: true, verified: false,
+          outcome: 'STOPPED', cast: true, townName: fishingTown, notificationEvidence };
+        return { ok: false, code: 'FISHING_STOP_CONTROL_MISSING', notificationEvidence };
+      }
       if (!(await Core.safeClick(findStop, {
         beforeMin: 0, beforeMax: 0, afterMin: 0, afterMax: 0, shouldCancel: () => false,
-      }))) return { ok: false, code: 'FISHING_STOP_CLICK_FAILED' };
-      const stopped = await Core.waitFor(() => !findStop() ? true : null, 5000, 150, () => false);
-      if (!stopped) return { ok: false, code: 'FISHING_STOP_UNVERIFIED' };
+      }))) return { ...uncertainEnd('FISHING_STOP_CLICK_FAILED'), notificationEvidence };
+      const observeEnd = settledEnd();
+      const ended = await Core.waitFor(() => { captureOutcome(); return observeEnd(); }, 5000, 150, () => false);
+      if (!ended) return { ...uncertainEnd('FISHING_SESSION_END_UNVERIFIED'), notificationEvidence };
+      if (shouldCancel()) return { ok: true, stopped: true, cancelled: true, verified: false,
+        outcome: 'STOPPED', cast: true, ownedStop: true, townName: fishingTown, notificationEvidence };
+      captureOutcome();
+      const outcomes = new Set(notificationEvidence.map((item) => item.outcome));
+      const castOutcome = outcomes.size === 1 ? [...outcomes][0] : outcomes.size ? 'AMBIGUOUS' : 'UNOBSERVED';
+      const settled = { cast: true, stopped: false, ownedStop: true, requestSettled: true,
+        townName: fishingTown, castOutcome, notificationEvidence, cooldown: settledCooldown };
+      if (castOutcome === 'EXPLICIT_ERROR') return { ...settled, ok: false, verified: false,
+        outcome: 'ACTION_FAILED', code: 'FISHING_CAST_REJECTED' };
+      if (!['CAUGHT', 'ACCEPTED_EMPTY'].includes(castOutcome)) return {
+        ...settled, ...uncertainEnd(castOutcome === 'AMBIGUOUS'
+          ? 'FISHING_CAST_OUTCOME_AMBIGUOUS' : 'FISHING_CAST_OUTCOME_UNOBSERVED'), notificationEvidence, castOutcome };
+      return { ...settled, ok: true, completed: true, requestAccepted: true };
+    } finally {
+      observer?.disconnect();
     }
-    if (completion?.cancelled || shouldCancel()) {
-      return { ok: true, stopped: true, cancelled: true, cast: true, townName: fishingTown };
-    }
-    return { ok: false, code: 'FISHING_CAST_TIMEOUT', cast: true, townName: fishingTown };
   };
 
   Modules.daily.fishingQuestTown = function () {
@@ -7131,6 +8935,30 @@
       : characterName === '연이' ? '심포니아' : '아스텔';
     Core.log('daily', `낚시 대상 확정: ${characterName} → ${townName} 낚시터`);
     return townName;
+  };
+
+  // 같은 실행에서 다시 던지기 전 쿨다운 대기(주간·일간 공용). 진행하면 null, 아니면 돌려줄 결과.
+  Modules.daily.waitForFishingRecast = async function (previous, shouldCancel, result) {
+    const cooldown = previous?.cooldown;
+    const now = Date.now();
+    const valid = previous?.ownedStop === true && previous?.requestAccepted === true &&
+      cooldown && Number.isSafeInteger(cooldown.observedAt) && cooldown.observedAt >= 0 &&
+      cooldown.observedAt <= now && Number.isSafeInteger(cooldown.remainingMs) &&
+      ((cooldown.state === 'ABSENT' && cooldown.remainingMs === 0) ||
+       (cooldown.state === 'CAST_COOLDOWN' && cooldown.remainingMs > 0 && cooldown.remainingMs <= 35000));
+    if (!valid) return { ok: false, verified: false, outcome: 'VERIFY_FAILED',
+      code: 'FISHING_COOLDOWN_WITNESS_INVALID', ...result };
+    if (!location.pathname.startsWith('/quests')) return { ok: false, verified: false,
+      outcome: 'VERIFY_FAILED', code: 'FISHING_COOLDOWN_WAIT_ROUTE_UNVERIFIED', ...result };
+    // The stopped page countdown decrements per React callback. Wait the
+    // witnessed elapsed duration on the existing quest route, then let the
+    // already-required fishing mount read the server's remaining cooldown.
+    const remainingMs = Math.max(0, cooldown.observedAt + cooldown.remainingMs - now);
+    if (!(await Core.interruptibleSleep(remainingMs, shouldCancel)) || shouldCancel()) return {
+      ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', ...result };
+    if (!location.pathname.startsWith('/quests')) return { ok: false, verified: false,
+      outcome: 'VERIFY_FAILED', code: 'FISHING_COOLDOWN_WAIT_ROUTE_UNVERIFIED', ...result };
+    return null;
   };
 
   Modules.daily.runDailyFishingQuestJob = async function (shouldCancel = () => false) {
@@ -7151,13 +8979,29 @@
         return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_FISHING_COLLECTION_PROGRESS_UNEXPECTED', before, afterCollection, prepared };
       }
     }
-    const cast = await this.castFishingQuestOnce(fishingTown, shouldCancel);
-    if (cast.stopped && shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', before, cast };
-    if (!cast.ok) return { ok: false, verified: false, outcome: 'ACTION_FAILED', code: cast.code, message: cast.message, before, cast };
-    const after = await this.readFishingQuestProgress('일간', '한가로운 낚시', shouldCancel);
-    if (!after) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_FISHING_VERIFY_MISSING', before, cast };
-    if (after.current !== before.current + 1) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_FISHING_PROGRESS_UNCHANGED', before, after, cast };
-    return { ok: true, verified: true, outcome: 'SUCCESS', code: 'DAILY_FISHING_COMPLETED', before, after, cast };
+    // 빈손이면 같은 실행에서 쿨다운 뒤 다시 던진다(사용자 결정 2026-10-07: 라시에·이라 빈손으로
+    // 일일 낚시 미완료). 주간 낚시와 같은 쿨다운 대기를 쓰고 최대 5회만 던진다.
+    const casts = [];
+    let cast = null;
+    let after = before;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) {
+        const blocked = await this.waitForFishingRecast(cast, shouldCancel, { before, after, cast, casts });
+        if (blocked) return blocked;
+      }
+      cast = await this.castFishingQuestOnce(fishingTown, shouldCancel, attempt > 0 ? 35000 : 6000);
+      casts.push(cast);
+      if (cast.ok !== false && cast.stopped && shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', before, cast, casts };
+      if (!cast.ok) return { ok: false, stopped: cast.stopped === true, verified: false, outcome: cast.outcome || 'ACTION_FAILED', code: cast.code, message: cast.message, before, cast, casts };
+      after = await this.readFishingQuestProgress('일간', '한가로운 낚시', shouldCancel);
+      if (!after) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_FISHING_VERIFY_MISSING', before, cast, casts };
+      if (!Number.isInteger(after.current) || after.target !== before.target || after.current > after.target) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_FISHING_PROGRESS_INVALID', before, after, cast, casts };
+      if (after.current === before.current && cast.castOutcome === 'ACCEPTED_EMPTY') continue;
+      if (after.current <= before.current) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_FISHING_PROGRESS_UNCHANGED', before, after, cast, casts };
+      if (after.current < after.target) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'DAILY_FISHING_INCOMPLETE', before, after, cast, casts };
+      return { ok: true, verified: true, outcome: 'SUCCESS', code: 'DAILY_FISHING_COMPLETED', before, after, cast, casts };
+    }
+    return { ok: true, verified: false, outcome: 'DEFERRED', code: 'DAILY_FISHING_ACCEPTED_EMPTY', before, after, cast, casts, retryAfterMs: 30 * 60 * 1000 };
   };
 
   Modules.daily.runFishingQuestJob = async function (shouldCancel = () => false) {
@@ -7184,16 +9028,28 @@
     }
     let progress = before;
     const casts = [];
-    // At most the observed deficit, and never more than ten casts in one job.
-    for (let attempt = 0; attempt < Math.min(10, before.target - before.current); attempt++) {
+    // Accepted empty results are known attempts; at most ten owned inputs per job.
+    for (let attempt = 0; attempt < 10; attempt++) {
       if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', before, after: progress, casts };
+      if (attempt > 0) {
+        const blocked = await this.waitForFishingRecast(casts[casts.length - 1], shouldCancel,
+          { before, after: progress, casts });
+        if (blocked) return blocked;
+      }
       const cast = await this.castFishingQuestOnce(fishingTown, shouldCancel, attempt > 0 ? 35000 : 6000);
       casts.push(cast);
-      if (cast.stopped && shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', before, after: progress, casts };
-      if (!cast.ok) return { ok: false, verified: false, outcome: 'ACTION_FAILED', code: cast.code, message: cast.message, before, after: progress, casts };
+      if (cast.ok !== false && cast.stopped && shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', before, after: progress, casts };
+      if (!cast.ok) return { ok: false, stopped: cast.stopped === true, verified: false, outcome: cast.outcome || 'ACTION_FAILED', code: cast.code, message: cast.message, before, after: progress, casts };
       const after = await this.readFishingQuestProgress('주간', '낚시광', shouldCancel);
       if (!after) return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'FISHING_QUEST_VERIFY_PROGRESS_MISSING', before, after: progress, casts };
-      if (after.current !== progress.current + 1) {
+      if (!Number.isInteger(after.current) || after.target !== before.target || after.current > after.target) {
+        return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'FISHING_QUEST_PROGRESS_INVALID', before, after, casts };
+      }
+      if (after.current === progress.current && cast.castOutcome === 'ACCEPTED_EMPTY') {
+        progress = after;
+        continue;
+      }
+      if (after.current <= progress.current) {
         return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'FISHING_QUEST_PROGRESS_UNCHANGED', before, after, casts };
       }
       progress = after;
@@ -7201,18 +9057,21 @@
         return { ok: true, verified: true, outcome: 'SUCCESS', code: 'FISHING_QUEST_COMPLETED', before, after: progress, casts };
       }
     }
-    return { ok: true, skipped: true, verified: true, outcome: 'DEFERRED', code: 'FISHING_QUEST_MORE_REQUIRED', before, after: progress, casts, retryAfterMs: 30 * 60 * 1000 };
+    return { ok: true, skipped: true, verified: false, outcome: 'DEFERRED', code: 'FISHING_QUEST_MORE_REQUIRED', before, after: progress, casts, retryAfterMs: 30 * 60 * 1000 };
   };
 
   Modules.daily.auditWeeklyQuestProgress = async function (
     shouldCancel = () => this.stopRequested || !Core.dailyActive
   ) {
+    if (!this.weeklyQuestRecoveryDue()) return {
+      ok: true, skipped: true, verified: true, outcome: 'NOT_DUE', code: 'WEEKLY_QUEST_NOT_DUE',
+    };
     const labels = [
       '주간 전투왕', '던전 정복자', '아레나 도전자', '개인 보스 사냥꾼',
       '꾸준한 수행', '낚시광', '레어맵 정복자', '길드의 용사',
     ];
     if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED' };
-    await Core.clickNavMenuExact('캐릭', '퀘스트');
+    if (!location.pathname.startsWith('/quests')) await Core.clickNavMenuExact('캐릭', '퀘스트', shouldCancel);
     const onPage = await Core.waitFor(() => location.pathname.startsWith('/quests'), 15000, 300, shouldCancel);
     if (!onPage || shouldCancel()) {
       return { ok: false, verified: false, outcome: 'PRECONDITION_FAILED', code: 'WEEKLY_QUEST_PAGE_MISSING' };
@@ -7233,6 +9092,8 @@
     if (!selected || shouldCancel()) {
       return { ok: false, verified: false, outcome: 'VERIFY_FAILED', code: 'WEEKLY_QUEST_TAB_NOT_SELECTED' };
     }
+    await this.waitForQuestRows(labels, shouldCancel);
+    if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED' };
 
     const progress = {};
     const issues = [];
@@ -7289,11 +9150,28 @@
     }
   };
 
-  Modules.daily.runWeeklyQuestRewardWithRecheck = async function (shouldCancel = () => false) {
-    const first = await this.runQuestRewardJob('주간', shouldCancel);
+  Modules.daily.runWeeklyQuestRewardWithRecheck = async function (shouldCancel = () => false, observation = null) {
+    const prerequisite = async (allowReuse = false) => {
+      if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED' };
+      // The standalone reward entry must obey the same window before navigation.
+      if (!this.weeklyQuestRecoveryDue()) return { ok: true, skipped: true, verified: true,
+        outcome: 'NOT_DUE', code: 'WEEKLY_QUEST_REWARD_NOT_DUE' };
+      const audit = allowReuse && observation?.reuse?.valid(observation.audit, '주간')
+        ? observation.audit : await this.auditWeeklyQuestProgress(shouldCancel);
+      if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED' };
+      if (!this.weeklyQuestRewardEligible(audit)) return { ok: false, verified: false,
+        outcome: 'PRECONDITION_FAILED', code: 'WEEKLY_QUEST_REWARD_PREREQUISITE_UNMET', audit };
+      return null;
+    };
+    const blocked = await prerequisite(true);
+    if (blocked) return blocked;
+    const first = await this.runQuestRewardJob('주간', shouldCancel, observation?.reuse);
     if (!['WEEKLY_QUEST_REWARD_INCOMPLETE', 'WEEKLY_QUEST_REWARD_STATE_MISSING'].includes(first?.code) || shouldCancel()) return first;
+    observation?.reuse?.invalidate();
     await Core.interruptibleSleep(900, shouldCancel, 300);
-    const second = await this.runQuestRewardJob('주간', shouldCancel);
+    const recheckBlocked = await prerequisite();
+    if (recheckBlocked) return recheckBlocked;
+    const second = await this.runQuestRewardJob('주간', shouldCancel, observation?.reuse);
     return { ...second, firstCheck: { code: first.code, outcome: first.outcome, progress: first.progress || null }, rechecked: true };
   };
 
@@ -8065,1093 +9943,23 @@
     refs.inputs = [];
   }
 
-  // -------------------------- 가을 심층던전 아레나 --------------------------
-  Modules.preseason = {
-    id: 'preseason',
-    running: false,
-    stopRequested: false,
-    cycleCount: 0,
-  };
-
-  Modules.preseason.readAutumnTokenProgress = function () {
-    const text = Core.bodyText();
-    const today = text.match(/오늘 획득한 단풍 토큰\s*(\d+)\s*\/\s*(\d+)\s*개/);
-    const weekly = text.match(/이번 주 획득한 단풍 토큰\s*(\d+)\s*\/\s*(\d+)\s*개/);
-    if (!today || !weekly) return null;
-    return {
-      today: { current: Number(today[1]), max: Number(today[2]) },
-      weekly: { current: Number(weekly[1]), max: Number(weekly[2]) },
-    };
-  };
-
-  Modules.preseason.findReadyBattleStartButton = function () {
-    return Core.allButtons().find((button) => {
-      const text = button.textContent.replace(/\s+/g, ' ').trim();
-      return text.startsWith('전투 시작') && !button.disabled &&
-        button.getAttribute('aria-disabled') !== 'true' && Core.isElementVisible(button);
-    }) || null;
-  };
-
-  Modules.preseason.readAutumnBoardProgress = function () {
-    const match = Core.bodyText().match(/진행\s*(\d+)\s*\/\s*(\d+)/);
-    if (!match) return null;
-    const current = Number(match[1]);
-    const max = Number(match[2]);
-    return Number.isInteger(current) && Number.isInteger(max) && max === 15 && current >= 0 && current <= max
-      ? { current, max }
-      : null;
-  };
-
-  Modules.preseason.goToAutumnBoard = async function (shouldCancel = Core.defaultShouldCancel) {
-    const onBoard = () =>
-      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
-      new URLSearchParams(location.search).get('tab') === 'board' &&
-      !!this.readAutumnBoardProgress();
-    if (onBoard()) return true;
-
-    if (location.pathname.replace(/\/$/, '') !== '/event/autumn') {
-      const headerButtons = Core.gameElements('header button').filter((button) => Core.isElementVisible(button));
-      const menuButton = headerButtons[headerButtons.length - 1];
-      if (!menuButton) throw new Error('상단 오른쪽 메뉴 아이콘을 찾지 못했습니다.');
-      if (!(await Core.safeClick(() => menuButton, { shouldCancel }))) {
-        throw new Error('상단 오른쪽 메뉴 아이콘 클릭에 실패했습니다.');
-      }
-      const autumnMenu = await Core.waitFor(
-        () => Core.gameElements('[role="menuitem"]').find(
-          (item) => Core.isElementVisible(item) && item.textContent.trim() === '가을 이벤트'
-        ) || null,
-        5000,
-        150,
-        shouldCancel
-      );
-      if (!autumnMenu) throw new Error('오른쪽 메뉴에서 "가을 이벤트"를 찾지 못했습니다.');
-      if (!(await Core.safeClick(() => autumnMenu, { shouldCancel }))) {
-        throw new Error('오른쪽 메뉴의 "가을 이벤트" 클릭에 실패했습니다.');
-      }
-      const autumnPage = await Core.waitFor(
-        () => location.pathname.replace(/\/$/, '') === '/event/autumn' ? true : null,
-        12000,
-        250,
-        shouldCancel
-      );
-      if (!autumnPage) throw new Error('가을 이벤트 화면 진입을 확인하지 못했습니다.');
-    }
-
-    const boardTab = await Core.waitFor(
-      () => Core.findButtonByText('성장 보드'),
-      7000,
-      200,
-      shouldCancel
-    );
-    if (!boardTab) throw new Error('가을 이벤트의 "성장 보드" 탭을 찾지 못했습니다.');
-    if (!(await Core.safeClick(() => Core.findButtonByText('성장 보드'), {
-      beforeMin: 500,
-      beforeMax: 900,
-      afterMin: 700,
-      afterMax: 1100,
-      shouldCancel,
-    }))) throw new Error('"성장 보드" 탭 클릭에 실패했습니다.');
-    const ready = await Core.waitFor(() => onBoard() ? true : null, 10000, 250, shouldCancel);
-    if (!ready) throw new Error('성장 보드 진행 상태를 확인하지 못했습니다.');
-    return true;
-  };
-
-  Modules.preseason.readBoardStageNumber = function (element) {
-    const labels = [element, ...element.querySelectorAll('*')].flatMap((label) => {
-      const ariaLabel = label.getAttribute?.('aria-label')?.trim();
-      const text = label.children.length === 0 ? label.textContent.trim() : '';
-      return [ariaLabel, text].filter(Boolean);
-    });
-    const matched = labels.map((label) => label.match(/^([1-9]|1[0-5])\s*(?:단계)?$/)).find(Boolean);
-    return matched ? Number(matched[1]) : null;
-  };
-
-  Modules.preseason.findAvailableBoardStageButtons = function () {
-    return Core.gameElements('button, [role="button"]').filter((button) => {
-      // 단계 버튼의 전체 text는 숫자만이 아닐 수 있다(번호·잠금/보상 문구가
-      // 함께 렌더됨). 실제 page는 native button 또는 role=button이고, 번호는
-      // leaf text 또는 aria-label에 올 수 있으므로 semantic label로 식별한다.
-      const stage = this.readBoardStageNumber(button);
-      return stage !== null &&
-        Core.isElementVisible(button) &&
-        !button.disabled && !button.hasAttribute('disabled') &&
-        button.getAttribute('aria-disabled') !== 'true';
-    });
-  };
-
-  Modules.preseason.describeBoardStageControls = function () {
-    // Diagnostics only: retain the exact selection facts when a live board
-    // presents a numbered control but the strict next-stage predicate cannot
-    // accept it.  This prevents the next repair from guessing at React/ARIA
-    // timing or visibility behavior.
-    return Core.gameElements('button, [role="button"]').map((button) => {
-      const text = button.textContent.replace(/\s+/g, ' ').trim();
-      const stage = this.readBoardStageNumber(button);
-      return {
-        tag: button.tagName.toLowerCase(), text: text.slice(0, 48),
-        ariaLabel: button.getAttribute('aria-label') || '', stage,
-        disabled: !!button.disabled || button.hasAttribute('disabled'),
-        ariaDisabled: button.getAttribute('aria-disabled') || '',
-        visible: Core.isElementVisible(button),
-      };
-    }).filter((entry) => entry.stage !== null || /(?:^|\D)(?:[1-9]|1[0-5])(?:\D|$)/.test(`${entry.text} ${entry.ariaLabel}`));
-  };
-
-  Modules.preseason.findBoardStageCard = function (stage) {
-    // The live Board title is rendered as `1 . 스탯 …`: its stage number and
-    // period are separated by whitespace and the leaf can be a span, not a p.
-    // Match the semantic stage label, rather than a particular tag or the old
-    // no-space `1.` formatting.
-    const title = Core.gameElements('*').find(
-      (el) => el.children.length === 0 && new RegExp(`^${stage}(?:\\s*\\.\\s*|\\s*단계(?:\\s|$))`).test(el.textContent.trim())
-    );
-    if (!title) return null;
-    let node = title.parentElement;
-    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
-      const claimButtons = [...node.querySelectorAll('button')].filter(
-        (button) => button.textContent.trim() === '수령'
-      );
-      if (node.textContent.includes('보상') && claimButtons.length === 1) {
-        return { card: node, button: claimButtons[0] };
-      }
-    }
-    return null;
-  };
-
-  Modules.preseason.isBoardStageClaimed = function (stage) {
-    const title = Core.gameElements('*').find(
-      (el) => el.children.length === 0 && new RegExp(`^${stage}(?:\\s*\\.\\s*|\\s*단계(?:\\s|$))`).test(el.textContent.trim())
-    );
-    if (!title) return false;
-    let node = title.parentElement;
-    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
-      if (node.textContent.includes('보상') && node.textContent.includes('수령 완료')) return true;
-    }
-    return false;
-  };
-
-  Modules.preseason.claimAutumnBoardRewards = async function (
-    shouldCancel = () => Modules.daily.stopRequested || !Core.dailyActive
-  ) {
-    const mod = this;
-    await mod.goToAutumnBoard(shouldCancel);
-    let claimed = 0;
-
-    for (let guard = 0; guard < 15; guard += 1) {
-      if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
-      const before = mod.readAutumnBoardProgress();
-      if (!before) throw new Error('성장 보드 진행도를 읽지 못했습니다.');
-      if (before.current >= before.max) {
-        return claimed > 0
-          ? `성장 보드 보상 ${claimed}단계 수령 완료(${before.current}/${before.max})`
-          : `성장 보드 보상 이미 완료(${before.current}/${before.max})`;
-      }
-
-      const expectedStage = before.current + 1;
-      // Board progress becomes visible before the stage controls finish
-      // rendering.  The prior immediate snapshot saw no enabled stage at
-      // progress 0/15 in the live Chrome page and failed before step 1 could
-      // be selected.  Wait for precisely the next stage; do not guess or
-      // click another numbered control.
-      const availableStages = await Core.waitFor(() => {
-        const buttons = mod.findAvailableBoardStageButtons();
-        const numbers = buttons.map((button) => mod.readBoardStageNumber(button));
-        return buttons.length === 1 && numbers[0] === expectedStage ? buttons : null;
-      }, 8000, 200, shouldCancel);
-      if (!availableStages) {
-        const availableNumbers = mod.findAvailableBoardStageButtons()
-          .map((button) => mod.readBoardStageNumber(button));
-        const controls = mod.describeBoardStageControls().map((entry) =>
-          `${entry.tag}:${entry.text || '?'}(label=${entry.ariaLabel || '-'},stage=${entry.stage ?? '-'},disabled=${entry.disabled ? 1 : 0},aria=${entry.ariaDisabled || '-'},visible=${entry.visible ? 1 : 0})`
-        ).join(', ');
-        throw new Error(
-          `성장 보드 활성 단계 불일치: 진행 ${before.current}/${before.max}, ` +
-          `기대 ${expectedStage}단계, 실제 ${availableNumbers.length ? availableNumbers.join(',') : '없음'}; ` +
-          `후보 ${controls || '없음'}`
-        );
-      }
-
-      if (!(await Core.safeClick(
-        () => mod.findAvailableBoardStageButtons().find(
-          (button) => mod.readBoardStageNumber(button) === expectedStage
-        ) || null,
-        {
-          beforeMin: 500,
-          beforeMax: 900,
-          afterMin: 700,
-          afterMax: 1100,
-          shouldCancel,
-        }
-      ))) throw new Error(`성장 보드 ${expectedStage}단계 선택에 실패했습니다.`);
-
-      const claimable = await Core.waitFor(() => {
-        const current = mod.readAutumnBoardProgress();
-        if (!current || current.current !== before.current) return null;
-        const stageCard = mod.findBoardStageCard(expectedStage);
-        if (!stageCard || !stageCard.card.textContent.includes('보상')) return null;
-        const button = stageCard.button;
-        return Core.isElementVisible(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
-          ? stageCard
-          : null;
-      }, 8000, 250, shouldCancel);
-      if (!claimable) {
-        throw new Error(`성장 보드 ${expectedStage}단계의 보상과 활성 "수령" 버튼을 확인하지 못했습니다.`);
-      }
-
-      const received = await Core.safeClick(
-        () => {
-          const stageCard = mod.findBoardStageCard(expectedStage);
-          if (!stageCard) return null;
-          const button = stageCard.button;
-          return Core.isElementVisible(button) && !button.disabled && button.getAttribute('aria-disabled') !== 'true'
-            ? button
-            : null;
-        },
-        {
-          beforeMin: 350,
-          beforeMax: 650,
-          afterMin: 1000,
-          afterMax: 1500,
-          shouldCancel,
-          afterCheck: () => {
-            const after = mod.readAutumnBoardProgress();
-            return after && after.current === before.current + 1 && mod.isBoardStageClaimed(expectedStage)
-              ? after
-              : null;
-          },
-          afterTimeout: 12000,
-        }
-      );
-      if (!received) {
-        throw new Error(`성장 보드 ${expectedStage}단계 수령 후 진행도 증가와 "수령 완료"를 확인하지 못했습니다.`);
-      }
-      claimed += 1;
-      Core.log('preseason', `성장 보드 ${expectedStage}단계 보상 수령 확인(${before.current + 1}/${before.max})`);
-    }
-
-    const finalProgress = mod.readAutumnBoardProgress();
-    if (!finalProgress || finalProgress.current !== finalProgress.max) {
-      throw new Error('성장 보드 15단계 처리 후 완료 상태를 확인하지 못했습니다.');
-    }
-    return `성장 보드 보상 ${claimed}단계 수령 완료(${finalProgress.current}/${finalProgress.max})`;
-  };
-
-  Modules.preseason.findPunchKingCard = function (targetName) {
-    const nameLeaf = Core.gameElements('*').find(
-      (el) => el.children.length === 0 && el.textContent.trim() === targetName
-    );
-    if (!nameLeaf) return null;
-    let node = nameLeaf.parentElement;
-    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
-      const challengeButtons = [...node.querySelectorAll('button')].filter(
-        (button) => button.textContent.trim() === '도전하기'
-      );
-      if (challengeButtons.length !== 1 || !node.textContent.includes('이번 주 최고 기록')) continue;
-      const scoreMatch = node.textContent.match(/이번 주 최고 기록\s*([\d,]+)/);
-      return {
-        card: node,
-        button: challengeButtons[0],
-        score: scoreMatch ? Number(scoreMatch[1].replace(/,/g, '')) : null,
-      };
-    }
-    return null;
-  };
-
-  Modules.preseason.readPunchKingWeeklyRecords = function () {
-    const records = {};
-    for (const targetName of ['짚 허수아비', '강철 허수아비']) {
-      const target = this.findPunchKingCard(targetName);
-      if (!target || !Number.isFinite(target.score)) return null;
-      records[targetName] = target.score;
-    }
-    return records;
-  };
-
-  Modules.preseason.readPunchKingResultScore = function (targetName) {
-    const resultTitle = Core.gameElements('*').find(
-      (el) => el.children.length === 0 && el.textContent.trim() === `${targetName} 펀치킹 도전`
-    );
-    if (!resultTitle) return null;
-    let card = resultTitle.parentElement;
-    for (let depth = 0; card && depth < 8; depth += 1, card = card.parentElement) {
-      if (!card.textContent.includes('누적 데미지')) continue;
-      const scoreLeaf = [...card.querySelectorAll('*')].find(
-        (el) => el.children.length === 0 && /^[\d,]+$/.test(el.textContent.trim())
-      );
-      if (!scoreLeaf) continue;
-      const score = Number(scoreLeaf.textContent.replace(/,/g, ''));
-      return Number.isFinite(score) && score > 0 ? score : null;
-    }
-    return null;
-  };
-
-  Modules.preseason.claimPunchKingWeeklyRewardIfAvailable = async function (
-    shouldCancel = Core.defaultShouldCancel
-  ) {
-    const mod = this;
-    const findRewardTab = () => Core.gameElements('[role="tab"]').find(
-      (tab) => Core.isElementVisible(tab) && tab.textContent.trim() === '보상'
-    ) || null;
-    const findBattleTab = () => {
-      const tabs = Core.gameElements('[role="tab"]').filter(
-        (tab) => Core.isElementVisible(tab) && tab.textContent.trim() === '도전'
-      );
-      if (tabs.length > 1) throw new Error(`허수아비 펀치킹의 도전 탭이 ${tabs.length}개입니다.`);
-      return tabs[0] || null;
-    };
-    const isOnWeeklyReward = () =>
-      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
-      findRewardTab()?.getAttribute('aria-selected') === 'true' &&
-      Core.bodyText().includes('주간 보상');
-    const inspectReward = () => {
-      if (!isOnWeeklyReward()) return null;
-      const claimButtons = Core.allButtons().filter(
-        (button) => Core.isElementVisible(button) && button.textContent.trim() === '보상 수령'
-      );
-      const enabledClaimButtons = claimButtons.filter(
-        (button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true'
-      );
-      if (enabledClaimButtons.length === 1) return { state: 'CLAIMABLE', button: enabledClaimButtons[0] };
-      if (enabledClaimButtons.length > 1) {
-        throw new Error(`허수아비 펀치킹 주간 보상 수령 버튼이 ${enabledClaimButtons.length}개입니다.`);
-      }
-      const completed = Core.bodyText().includes('보상 수령 완료') ||
-        Core.allButtons().some((button) => Core.isElementVisible(button) && button.textContent.trim() === '수령 완료');
-      return completed ? { state: 'ALREADY_CLAIMED' } : null;
-    };
-
-    await mod.goToAutumnPunchKing(shouldCancel);
-    if (shouldCancel()) throw new Error('사용자가 일일 실행을 중단했습니다.');
-    const rewardTab = await Core.waitFor(findRewardTab, 7000, 200, shouldCancel);
-    if (!rewardTab) throw new Error('허수아비 펀치킹의 보상 탭을 찾지 못했습니다.');
-    if (rewardTab.getAttribute('aria-selected') !== 'true') {
-      if (!(await Core.safeClick(findRewardTab, {
-        beforeMin: 350,
-        beforeMax: 650,
-        afterMin: 450,
-        afterMax: 750,
-        shouldCancel,
-      }))) throw new Error('허수아비 펀치킹의 보상 탭 클릭에 실패했습니다.');
-    }
-    const reward = await Core.waitFor(inspectReward, 10000, 250, shouldCancel);
-    if (!reward) throw new Error('허수아비 펀치킹 주간 보상 화면 또는 수령 상태를 확인하지 못했습니다.');
-
-    if (reward.state === 'CLAIMABLE') {
-      const claimed = await Core.safeClick(
-        () => {
-          const current = inspectReward();
-          return current?.state === 'CLAIMABLE' ? current.button : null;
-        },
-        {
-          beforeMin: 350,
-          beforeMax: 650,
-          afterMin: 900,
-          afterMax: 1400,
-          shouldCancel,
-          afterCheck: () => inspectReward()?.state === 'ALREADY_CLAIMED' ? true : null,
-          afterTimeout: 12000,
-        }
-      );
-      if (!claimed) throw new Error('허수아비 펀치킹 주간 보상 수령 후 완료 상태를 확인하지 못했습니다.');
-      Core.log('preseason', '허수아비 펀치킹 주간 보상 수령 완료');
-    } else {
-      Core.log('preseason', '허수아비 펀치킹 주간 보상 이미 수령');
-    }
-
-    const battleTab = await Core.waitFor(findBattleTab, 7000, 200, shouldCancel);
-    if (!battleTab) throw new Error('허수아비 펀치킹의 도전 탭을 찾지 못했습니다.');
-    if (!(await Core.safeClick(findBattleTab, {
-      beforeMin: 350,
-      beforeMax: 650,
-      afterMin: 450,
-      afterMax: 750,
-      shouldCancel,
-      afterCheck: () => mod.readPunchKingWeeklyRecords() || null,
-      afterTimeout: 10000,
-    }))) throw new Error('허수아비 펀치킹의 도전 탭 복귀 또는 주간 기록 확인에 실패했습니다.');
-
-    return {
-      ok: true,
-      skipped: reward.state !== 'CLAIMABLE',
-      code: reward.state === 'CLAIMABLE'
-        ? 'PUNCH_KING_WEEKLY_REWARD_CLAIMED'
-        : 'PUNCH_KING_WEEKLY_REWARD_ALREADY_CLAIMED',
-    };
-  };
-
-  // 펀치킹 전투 결과는 완료 화면이 아니라 목록으로 복귀해야만 다음 대상 또는
-  // 이벤트 다음 단계로 진행할 수 있는 중간 화면이다. 결과 직후뿐 아니라
-  // 업데이트/재개 등으로 이 화면에서 다시 진입했을 때도 같은 복귀를 보장한다.
-  Modules.preseason.returnFromPunchKingResult = async function (shouldCancel = Core.defaultShouldCancel) {
-    const onResult = () =>
-      location.pathname.replace(/\/$/, '') === '/autumn-battle' &&
-      Core.bodyText().includes('펀치킹 도전');
-    if (!onResult()) return false;
-
-    // 결과 점수 heading은 CTA보다 먼저 렌더될 수 있다. 따라서 점수 확인 직후
-    // 한 번만 찾지 말고, 실제로 visible+enabled 된 정확한 복귀 버튼을 기다린다.
-    const returnButton = await Core.waitFor(() => {
-      const button = Core.findButtonByText('허수아비 펀치킹으로 돌아가기');
-      return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true' ? button : null;
-    }, 15000, 200, shouldCancel);
-    if (!returnButton) throw new Error('펀치킹 결과 화면의 "허수아비 펀치킹으로 돌아가기" 버튼을 기다리는 중 찾지 못했습니다.');
-
-    const returned = await Core.safeClick(
-      () => Core.findButtonByText('허수아비 펀치킹으로 돌아가기'),
-      {
-        beforeMin: 180,
-        beforeMax: 360,
-        shouldCancel,
-        afterCheck: () =>
-          location.pathname.replace(/\/$/, '') === '/event/autumn' &&
-          !Core.bodyText().includes('펀치킹 도전') &&
-          this.readPunchKingWeeklyRecords()
-            ? true
-            : null,
-        afterTimeout: 15000,
-      }
-    );
-    if (!returned) throw new Error('펀치킹 결과 화면의 "허수아비 펀치킹으로 돌아가기" 클릭 또는 목록 복귀 확인에 실패했습니다.');
-    return true;
-  };
-
-  Modules.preseason.goToAutumnPunchKing = async function (shouldCancel = Core.defaultShouldCancel) {
-    const onPunchKing = () =>
-      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
-      !!this.readPunchKingWeeklyRecords();
-    await this.returnFromPunchKingResult(shouldCancel);
-    if (onPunchKing()) return true;
-
-    if (location.pathname.replace(/\/$/, '') !== '/event/autumn') {
-      const headerButtons = Core.gameElements('header button').filter((button) => Core.isElementVisible(button));
-      const menuButton = headerButtons[headerButtons.length - 1];
-      if (!menuButton) throw new Error('상단 오른쪽 메뉴 아이콘을 찾지 못했습니다.');
-      if (!(await Core.safeClick(() => menuButton, { shouldCancel }))) {
-        throw new Error('상단 오른쪽 메뉴 아이콘 클릭에 실패했습니다.');
-      }
-      const autumnMenu = await Core.waitFor(
-        () => Core.gameElements('[role="menuitem"]').find(
-          (item) => Core.isElementVisible(item) && item.textContent.trim() === '가을 이벤트'
-        ) || null,
-        5000,
-        150,
-        shouldCancel
-      );
-      if (!autumnMenu) throw new Error('오른쪽 메뉴에서 "가을 이벤트"를 찾지 못했습니다.');
-      if (!(await Core.safeClick(() => autumnMenu, { shouldCancel }))) {
-        throw new Error('오른쪽 메뉴의 "가을 이벤트" 클릭에 실패했습니다.');
-      }
-      const autumnPage = await Core.waitFor(
-        () => location.pathname.replace(/\/$/, '') === '/event/autumn' ? true : null,
-        12000,
-        250,
-        shouldCancel
-      );
-      if (!autumnPage) throw new Error('가을 이벤트 화면 진입을 확인하지 못했습니다.');
-    }
-
-    const punchKingTab = await Core.waitFor(
-      () => Core.findButtonByText('허수아비 펀치킹'),
-      7000,
-      200,
-      shouldCancel
-    );
-    if (!punchKingTab) throw new Error('가을 이벤트의 "허수아비 펀치킹" 탭을 찾지 못했습니다.');
-    if (!(await Core.safeClick(() => Core.findButtonByText('허수아비 펀치킹'), { shouldCancel }))) {
-      throw new Error('"허수아비 펀치킹" 탭 클릭에 실패했습니다.');
-    }
-    const ready = await Core.waitFor(() => onPunchKing() ? true : null, 10000, 250, shouldCancel);
-    if (!ready) throw new Error('허수아비 펀치킹 주간 기록 화면을 확인하지 못했습니다.');
-    return true;
-  };
-
-  Modules.preseason.runPunchKingIfMissing = async function (
-    shouldCancel = () => Modules.daily.stopRequested || !Core.dailyActive
-  ) {
-    const mod = this;
-    await mod.claimPunchKingWeeklyRewardIfAvailable(shouldCancel);
-    const initialRecords = mod.readPunchKingWeeklyRecords();
-    if (!initialRecords) throw new Error('허수아비 펀치킹 주간 최고 기록을 읽지 못했습니다.');
-
-    const missingTargets = Object.entries(initialRecords)
-      .filter(([, score]) => score === 0)
-      .map(([targetName]) => targetName);
-    if (missingTargets.length === 0) {
-      const summary = Object.entries(initialRecords)
-        .map(([name, score]) => `${name} ${score.toLocaleString()}`)
-        .join(', ');
-      Core.log('preseason', `허수아비 펀치킹 주간 기록 있음(${summary}) → 실행 생략`);
-      return `허수아비 펀치킹 실행 생략: ${summary}`;
-    }
-
-    Core.log('preseason', `주간 기록 0인 허수아비(${missingTargets.join(', ')}) 확인 → 공용 프리셋 "히드라" 적용`);
-    await Core.applyCommonPreset('히드라', 'preseason');
-    if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
-    await mod.goToAutumnPunchKing(shouldCancel);
-
-    const completed = [];
-    for (const targetName of missingTargets) {
-      if (shouldCancel()) throw new Error('사용자가 일일 실행을 정지했습니다.');
-      const before = mod.findPunchKingCard(targetName);
-      if (!before || before.score === null) {
-        throw new Error(`${targetName}의 주간 최고 기록을 다시 읽지 못했습니다.`);
-      }
-      if (before.score > 0) {
-        Core.log('preseason', `${targetName} 주간 기록이 이미 ${before.score.toLocaleString()}으로 갱신됨 → 도전 생략`);
-        continue;
-      }
-      if (before.score !== 0) throw new Error(`${targetName}의 주간 최고 기록이 올바르지 않습니다.`);
-
-      const clicked = await Core.safeClick(
-        () => {
-          const current = mod.findPunchKingCard(targetName);
-          return current && current.score === 0 ? current.button : null;
-        },
-        {
-          beforeMin: 500,
-          beforeMax: 900,
-          shouldCancel,
-          afterCheck: () => location.pathname.replace(/\/$/, '') === '/autumn-battle' ? true : null,
-          afterTimeout: 15000,
-        }
-      );
-      if (!clicked) throw new Error(`${targetName} "도전하기" 클릭 또는 결과 화면 확인에 실패했습니다.`);
-
-      const result = await Core.waitFor(() => {
-        return mod.readPunchKingResultScore(targetName);
-      }, 15000, 250, shouldCancel);
-      if (!result) throw new Error(`${targetName} 펀치킹 결과 점수를 확인하지 못했습니다.`);
-
-      const returned = await mod.returnFromPunchKingResult(shouldCancel);
-      if (!returned) throw new Error(`${targetName} 결과 화면에서 펀치킹 목록 복귀 상태를 확인하지 못했습니다.`);
-      const verified = mod.findPunchKingCard(targetName);
-      if (!verified || !Number.isFinite(verified.score) || verified.score <= 0) {
-        throw new Error(`${targetName} 도전 후 주간 최고 기록 갱신을 확인하지 못했습니다.`);
-      }
-      completed.push(`${targetName} ${verified.score.toLocaleString()}`);
-      Core.log('preseason', `${targetName} 펀치킹 1회 완료: 주간 최고 기록 ${verified.score.toLocaleString()}`);
-    }
-    return completed.length > 0
-      ? `허수아비 펀치킹 완료: ${completed.join(', ')}`
-      : '허수아비 펀치킹 실행 생략: 확인 중 주간 기록 갱신됨';
-  };
-
-  Modules.preseason.goToAutumnDeepArena = async function () {
-    const onArena = () =>
-      location.pathname.replace(/\/$/, '') === '/event/autumn' &&
-      Core.bodyText().includes('오늘 획득한 단풍 토큰') &&
-      Core.bodyText().includes('이번 주 획득한 단풍 토큰');
-    if (onArena()) return true;
-
-    // 우측 끝 프로필 아이콘 → 가을 이벤트 → 심층던전 아레나 순서로 진입한다.
-    const headerButtons = Core.gameElements('header button').filter((button) => Core.isElementVisible(button));
-    const menuButton = headerButtons[headerButtons.length - 1];
-    if (!menuButton) throw new Error('상단 오른쪽 메뉴 아이콘을 찾지 못했습니다.');
-    menuButton.click();
-    const autumnMenu = await Core.waitFor(
-      () => Core.gameElements('[role="menuitem"]').find(
-        (item) => Core.isElementVisible(item) && item.textContent.trim() === '가을 이벤트'
-      ) || null,
-      5000,
-      150
-    );
-    if (!autumnMenu) throw new Error('오른쪽 메뉴에서 "가을 이벤트"를 찾지 못했습니다.');
-    await Core.humanDelay(500, 900);
-    autumnMenu.click();
-
-    const autumnPage = await Core.waitFor(
-      () => location.pathname.replace(/\/$/, '') === '/event/autumn' ? true : null,
-      12000,
-      250
-    );
-    if (!autumnPage) throw new Error('가을 이벤트 화면 진입을 확인하지 못했습니다.');
-    const arenaTab = await Core.waitFor(
-      () => Core.findButtonByText('심층던전 아레나'),
-      7000,
-      200
-    );
-    if (!arenaTab) throw new Error('가을 이벤트의 "심층던전 아레나" 탭을 찾지 못했습니다.');
-    await Core.humanDelay(500, 900);
-    arenaTab.click();
-    const ready = await Core.waitFor(() => onArena() ? true : null, 10000, 250);
-    if (!ready) throw new Error('심층던전 아레나 진행률 화면을 확인하지 못했습니다.');
-    return true;
-  };
-
-  Modules.preseason.runAutumnDeepArenaUntilCap = async function (shouldCancel = Core.defaultShouldCancel) {
-    const mod = this;
-    await mod.goToAutumnDeepArena();
-    let fought = false;
-    while (!mod.stopRequested) {
-      const before = mod.readAutumnTokenProgress();
-      if (!before) throw new Error('오늘/주간 단풍 토큰 진행률을 읽지 못했습니다.');
-      if (before.today.current >= before.today.max || before.weekly.current >= before.weekly.max) {
-        return { ok: true, skipped: !fought, outcome: fought ? 'SUCCESS' : 'ALREADY_DONE', code: fought ? 'AUTUMN_DEEP_ARENA_COMPLETED' : 'AUTUMN_DEEP_ARENA_TOKEN_CAP_REACHED', progress: before };
-      }
-      Core.log('preseason', `단풍 토큰 획득 전투 준비: 오늘 ${before.today.current}/${before.today.max}, 주간 ${before.weekly.current}/${before.weekly.max}`);
-      if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED' };
-      const readyState = await Core.waitFor(() => {
-        const progress = mod.readAutumnTokenProgress();
-        if (progress && (progress.today.current >= progress.today.max || progress.weekly.current >= progress.weekly.max)) return { completed: true, progress };
-        const button = mod.findReadyBattleStartButton();
-        return button ? { completed: false, button } : null;
-      }, 12000, 250, shouldCancel);
-      if (!readyState) throw new Error('가을 심층던전 아레나의 완료 상태나 활성화된 "전투 시작" 버튼을 확인하지 못했습니다.');
-      if (readyState.completed) return { ok: true, skipped: !fought, outcome: fought ? 'SUCCESS' : 'ALREADY_DONE', code: fought ? 'AUTUMN_DEEP_ARENA_COMPLETED' : 'AUTUMN_DEEP_ARENA_TOKEN_CAP_REACHED', progress: readyState.progress };
-      if (!(await Core.safeClick(() => mod.findReadyBattleStartButton(), { beforeMin: 180, beforeMax: 420, afterMin: 120, afterMax: 260, shouldCancel }))) throw new Error('가을 심층던전 아레나 "전투 시작" 버튼 클릭에 실패했습니다.');
-      const resultBack = await Core.waitFor(() => Core.findButtonByText('심층던전 아레나로 돌아가기'), 15000, 250, shouldCancel);
-      if (!resultBack) throw new Error('가을 심층던전 아레나 전투 결과 화면을 확인하지 못했습니다.');
-      if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED' };
-      await Core.humanDelay(180, 350);
-      if (!(await Core.safeClick(() => Core.findButtonByText('심층던전 아레나로 돌아가기'), { beforeMin: 150, beforeMax: 320, afterMin: 180, afterMax: 380, shouldCancel }))) throw new Error('"심층던전 아레나로 돌아가기" 버튼 클릭에 실패했습니다.');
-      const increased = await Core.waitFor(() => {
-        const after = mod.readAutumnTokenProgress();
-        return after && (after.today.current > before.today.current || after.weekly.current > before.weekly.current) ? after : null;
-      }, 12000, 300, shouldCancel);
-      if (!increased) throw new Error('전투 후 단풍 토큰 진행률 증가를 확인하지 못했습니다.');
-      fought = true;
-      mod.cycleCount++;
-      Core.updateModuleButtons();
-      Core.log('preseason', `가을 심층던전 아레나 전투 완료: 오늘 ${increased.today.current}/${increased.today.max}, 주간 ${increased.weekly.current}/${increased.weekly.max}`);
-      await Core.humanDelay(120, 280);
-    }
-    return { ok: true, stopped: true, code: 'STOPPED' };
-  };
-
-  Modules.preseason.mainLoop = async function () {
-    const mod = this;
-    mod.cycleCount = 0;
-    const shouldCancel = Core.defaultShouldCancel;
-    const stages = [];
-    const runStage = async (id, execute, describe = () => ({})) => {
-      if (shouldCancel()) return false;
-      try {
-        const result = await execute();
-        if (result?.stopped || shouldCancel()) return false;
-        stages.push({ id, ok: true, ...describe(result), result });
-      } catch (error) {
-        if (shouldCancel() || error?.isUserStop) return false;
-        const message = String(error?.message || error);
-        stages.push({ id, ok: false, code: `AUTUMN_EVENT_${id.toUpperCase()}_FAILED`, message });
-        Core.log('preseason', `⚠ 이벤트 ${id} 실패 — 다음 적용 가능한 단계를 계속합니다: ${message}`);
-      }
-      return true;
-    };
-
-    if (!(await runStage('punchKing', () => mod.runPunchKingIfMissing(shouldCancel), (message) => ({
-      code: String(message).includes('실행 생략') ? 'AUTUMN_PUNCH_KING_WEEKLY_RECORD_EXISTS' : 'AUTUMN_PUNCH_KING_COMPLETED',
-      outcome: String(message).includes('실행 생략') ? 'ALREADY_DONE' : 'SUCCESS', message,
-    })))) return;
-    if (!(await runStage('boardRewards', () => mod.claimAutumnBoardRewards(shouldCancel), (message) => ({ code: 'AUTUMN_BOARD_REWARDS_COMPLETED', outcome: 'SUCCESS', message })))) return;
-    if (!(await runStage('deepArena', () => mod.runAutumnDeepArenaUntilCap(shouldCancel), (result) => ({ code: result.code, outcome: result.outcome, message: result.code === 'AUTUMN_DEEP_ARENA_TOKEN_CAP_REACHED' ? '오늘 또는 주간 단풍 토큰 한도 도달 - 전투 생략' : '가을 심층던전 아레나 완료' })))) return;
-    if (!(await runStage('tokenUse', () => mod.useAutumnTokens(shouldCancel), (result) => ({ code: result?.usedCycles === 0 ? 'AUTUMN_TOKEN_USE_NOTHING_TO_USE' : 'AUTUMN_TOKEN_USE_COMPLETED', outcome: result?.usedCycles === 0 ? 'ALREADY_DONE' : 'SUCCESS', message: result?.usedCycles === 0 ? '사용할 단풍 토큰 없음 - 건너뜀' : '단풍 토큰 사용 완료' })))) return;
-
-    const failures = stages.filter((stage) => !stage.ok);
-    const summary = stages.map((stage) => stage.ok ? `${stage.id}[${stage.code}]: ${stage.message || stage.code}` : `${stage.id}[${stage.code}]: 실패(${stage.message})`).join(' / ');
-    if (failures.length) {
-      Core.moduleResults.preseason = { ok: false, code: 'AUTUMN_EVENT_PARTIAL_FAILURE', stages, message: summary, at: Date.now() };
-      Core.log('preseason', `⚠ 이벤트 일부 단계 실패(후속 단계는 실행됨): ${summary}`);
-      Core.showBanner('preseason', summary, false);
-      Core.stopModule('preseason');
-      return;
-    }
-    Core.notifyCompleted('preseason', summary);
-  };
-
-  // ⚠ 사용자 요청(2026-08): 가을 이벤트 "단풍 토큰"을 인벤토리에서
-  // 찾아 "사용 가능 상태"로 전환하는 일회성 액션. 프리시즌 탭에 묶어두고
-  // 프리시즌이 끝나면(여름 이벤트도 같이 끝날 것으로 예상) 이 로직도 함께
-  // 폐기한다. 자동 반복 매크로가 아니라 버튼 클릭 시 즉시 실행되는 1회성
-  // 액션이다.
-  //
-  // 실전 확인: "사용" 클릭 시 확인창이 뜨고, 수량 입력칸은 이미 그 아이템의
-  // 1회 사용 최대치(실전 확인: 50개)로 자동 채워져 있다(수정 불필요, 손대면
-  // 안 됨 - 보상 상자 사용 로직에서 겪은 것과 동일한 함정). "사용" 확정하면
-  // "단풍 토큰 N개를 사용 가능 상태로 전환했습니다"로 즉시 처리되고, 그
-  // 행이 목록에서 갱신된다(수량이 줄거나 완전히 사라짐). 보유 수량이
-  // 많으면(예: 547개) 여러 번 반복해야 다 소진된다.
-  Modules.preseason.useAutumnTokens = async function (shouldCancel = () => false) {
-    const stopIfRequested = () => {
-      if (!shouldCancel()) return;
-      const error = new Error('사용자가 단풍 토큰 사용을 정지했습니다.');
-      error.isUserStop = true;
-      throw error;
-    };
-    Core.log('preseason', '"단풍 토큰" 사용 시작');
-    stopIfRequested();
-    await Core.clickNavMenuExact('캐릭', '인벤토리');
-    const onInventoryPage = await Core.waitFor(() => location.pathname.startsWith('/inventory'), 15000, 300, shouldCancel);
-    if (!onInventoryPage) throw new Error('인벤토리 화면 진입을 확인하지 못했습니다.');
-    await Core.humanDelay(500, 900);
-
-    if (!(await Core.safeClick(() => Core.findButtonByText('소모품'), { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1100, shouldCancel }))) {
-      throw new Error('"소모품" 탭 클릭에 실패했습니다.');
-    }
-
-    const findTokenRow = () => {
-      const rows = Core.gameElements('tr').filter((tr) => tr.textContent.includes('단풍 토큰') && Core.isElementVisible(tr));
-      if (rows.length > 1) throw new Error(`단풍 토큰 행이 ${rows.length}개입니다.`);
-      return rows[0] || null;
-    };
-    const readTokenQuantity = (row) => {
-      if (!row) return null;
-      const text = row.textContent.replace(/\s+/g, ' ');
-      const named = text.match(/단풍 토큰\s*(?:[x×]\s*)?([\d,]+)\s*개/)
-        || text.match(/단풍 토큰\s*[x×]\s*([\d,]+)/);
-      if (named) return Number(named[1].replace(/,/g, ''));
-      const cells = [...row.querySelectorAll('td')];
-      const countText = cells[1]?.textContent.trim() || '';
-      return /^[\d,]+$/.test(countText) ? Number(countText.replace(/,/g, '')) : null;
-    };
-
-    let usedCycles = 0;
-    const maxCycles = 30; // 1회당 최대 50개 * 30회 = 최대 1500개까지 대응
-    let exhausted = false;
-    for (; usedCycles < maxCycles;) {
-      stopIfRequested();
-      // 이전 사용으로 목록/페이지 구성이 바뀔 수 있으니 매번 1페이지로 복귀 후 탐색
-      const firstPageBtn = Core.gameElements('button').find(
-        (b) => b.getAttribute('aria-label') === 'Go to first page' && !b.disabled && Core.isElementVisible(b)
-      );
-      if (firstPageBtn) {
-        firstPageBtn.click();
-        await Core.humanDelay(300, 500);
-        stopIfRequested();
-      }
-
-      let row = findTokenRow();
-      if (!row) {
-        for (let page = 0; page < 20 && !row; page++) {
-          const nextPageBtn = Core.gameElements('button').find(
-            (b) => b.getAttribute('aria-label') === 'Go to next page' && !b.disabled && Core.isElementVisible(b)
-          );
-          if (!nextPageBtn) break;
-          nextPageBtn.click();
-          await Core.humanDelay(400, 700);
-          stopIfRequested();
-          row = findTokenRow();
-        }
-      }
-      if (!row) {
-        const morePages = Core.gameElements('button').some((b) =>
-          b.getAttribute('aria-label') === 'Go to next page' && !b.disabled && Core.isElementVisible(b)
-        );
-        if (morePages) throw new Error('단풍 토큰 인벤토리 탐색 페이지 한도에 도달했습니다.');
-        exhausted = true;
-        break;
-      }
-      const beforeQuantity = readTokenQuantity(row);
-      if (!Number.isSafeInteger(beforeQuantity) || beforeQuantity <= 0) {
-        throw new Error('단풍 토큰 사용 전 수량을 확인하지 못했습니다.');
-      }
-
-      const useBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-      if (!useBtn) throw new Error('"단풍 토큰" 사용 버튼을 찾지 못했습니다.');
-      if (!(await Core.safeClick(() => useBtn, { beforeMin: 400, beforeMax: 700, afterMin: 700, afterMax: 1000, shouldCancel }))) {
-        throw new Error('"단풍 토큰" 사용 버튼 클릭에 실패했습니다.');
-      }
-
-      const dialog = await Core.waitFor(
-        () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('단풍 토큰을(를) 사용하시겠습니까')) || null,
-        6000,
-        250,
-        shouldCancel
-      );
-      if (!dialog) throw new Error('"단풍 토큰" 사용 확인창을 찾지 못했습니다.');
-
-      // ⚠ 수량 입력칸은 이미 1회 사용 최대치로 채워져 있다 - 절대 건드리지 않는다.
-      const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-      if (!confirmBtn) throw new Error('"단풍 토큰" 사용 확인 버튼을 찾지 못했습니다.');
-      if (confirmBtn.disabled) throw new Error('"단풍 토큰" 사용 확인 버튼이 비활성화 상태입니다.');
-      if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400, shouldCancel }))) {
-        throw new Error('"단풍 토큰" 사용 클릭 결과를 확인하지 못했습니다. 재클릭하지 않습니다.');
-      }
-      const confirmed = await Core.waitFor(() => {
-        const openDialog = Core.gameElements('[role="dialog"]').some((d) =>
-          Core.isElementVisible(d) && d.textContent.includes('단풍 토큰을(를) 사용하시겠습니까')
-        );
-        if (openDialog) return null;
-        const current = findTokenRow();
-        if (!current) return true;
-        const afterQuantity = readTokenQuantity(current);
-        return Number.isSafeInteger(afterQuantity) && afterQuantity < beforeQuantity ? true : null;
-      }, 10000, 250, shouldCancel);
-      if (!confirmed) throw new Error('단풍 토큰 사용 후 행 수량 감소 또는 소멸을 확인하지 못했습니다. 재클릭하지 않습니다.');
-      usedCycles++;
-      Core.log('preseason', `"단풍 토큰" 사용 ${usedCycles}회차 완료`);
-    }
-
-    if (usedCycles === 0) {
-      Core.log('preseason', '"단풍 토큰"이 없거나 이미 전부 사용했습니다.');
-    } else {
-      Core.log('preseason', `"단풍 토큰" 사용 완료 (총 ${usedCycles}회 반복)`);
-    }
-    return { usedCycles, exhausted, bounded: usedCycles < maxCycles || exhausted };
-  };
-
-  const PRESEASON_ARENA_FISH_INTERVAL_MS = 30 * 60 * 1000;
-  Modules.preseasonArena = {
-    id: 'preseasonArena',
-    running: false,
-    stopRequested: false,
-    runId: 0,
-    loopPromise: null,
-    cycleCount: 0,
-    nextFishingAt: 0,
-  };
-
-  Modules.preseasonArena.ensureArena = async function () {
-    await Modules.arena.goToArena();
-    await Modules.arena.handleResultIfPresent();
-    if (!Core.bodyText().includes('프리시즌')) {
-      throw new Error('현재 아레나가 프리시즌 상태가 아닙니다. 무한아레나를 중단합니다.');
-    }
-  };
-
-  Modules.preseasonArena.waitForArenaStart = async function () {
-    const deadline = Date.now() + 95000;
-    while (!this.stopRequested && Date.now() < deadline) {
-      if (location.pathname.replace(/\/$/, '') !== '/arena') {
-        Core.log('preseasonArena', '다른 화면 감지 → 아레나로 자동 복귀');
-        await this.ensureArena();
-      }
-      const button = Core.findButtonByText('전투 시작');
-      if (button && !button.disabled) return button;
-      await Core.interruptibleSleep(800, () => this.stopRequested, 400);
-    }
-    return null;
-  };
-
-  Modules.preseasonArena.runFishingCycle = async function ({
-    shouldCancel = () => this.stopRequested,
-    moduleId = 'preseasonArena',
-    townName = '심포니아',
-  } = {}) {
-    if (!townName || typeof townName !== 'string') {
-      throw new Error('낚시 대상 마을을 확정하지 못했습니다.');
-    }
-    Core.log(moduleId, `통발 수거·재설치 작업 시작: ${townName} 낚시터`);
-    await Core.ensureAtTown(townName, moduleId);
-    if (shouldCancel()) return { stopped: true, collected: false, installed: false, townName };
-    await Core.clickNavMenuExact('마을', '낚시터', shouldCancel);
-    const arrived = await Core.waitFor(
-      () => location.pathname.startsWith('/fishing') && Core.bodyText().includes(`${townName} 낚시터`),
-      15000,
-      300,
-      shouldCancel
-    );
-    if (!arrived) throw new Error(`"${townName} 낚시터" 진입을 확인하지 못했습니다.`);
-    if (shouldCancel()) return { stopped: true, collected: false, installed: false, townName };
-
-    let installButton = Core.findButtonByText('통발 설치하기');
-    let collected = false;
-    if (!installButton) {
-      const collectButton = Core.findButtonByText('통발 수거하기');
-      if (!collectButton || collectButton.disabled) {
-        Core.log(moduleId, '통발이 아직 수거 불가 상태라 이번 확인은 보류합니다.');
-        return { stopped: false, collected: false, installed: false, deferred: true, townName };
-      }
-      if (!(await Core.safeClick(
-        () => {
-          if (shouldCancel()) return null;
-          const button = Core.findButtonByText('통발 수거하기');
-          return button && !button.disabled ? button : null;
-        },
-        { beforeMin: 450, beforeMax: 850, afterMin: 700, afterMax: 1100, shouldCancel }
-      ))) throw new Error('통발 수거 버튼 클릭에 실패했습니다.');
-      collected = true;
-      installButton = await Core.waitFor(() => Core.findButtonByText('통발 설치하기'), 8000, 250, shouldCancel);
-      if (!installButton) throw new Error('통발 수거 후 설치 버튼이 나타나지 않았습니다.');
-      Core.log(moduleId, '통발 수거 완료');
-    }
-
-    if (shouldCancel()) return { stopped: true, collected, installed: false, townName };
-    if (!(await Core.safeClick(
-      () => shouldCancel() ? null : Core.findButtonByText('통발 설치하기'),
-      { beforeMin: 450, beforeMax: 850, afterMin: 350, afterMax: 650, shouldCancel }
-    ))) throw new Error('통발 설치 버튼 클릭에 실패했습니다.');
-
-    const confirmButton = await Core.waitFor(() => {
-      const dialog = Core.gameElements('[role="dialog"]').find(
-        (el) => Core.isElementVisible(el) && el.textContent.includes('통발 설치 확인')
-      );
-      return dialog
-        ? [...dialog.querySelectorAll('button')].find((button) => button.textContent.trim() === '확인' && !button.disabled) || null
-        : null;
-    }, 6000, 200, shouldCancel);
-    if (!confirmButton) throw new Error('통발 설치 확인창의 확인 버튼을 찾지 못했습니다.');
-    if (!(await Core.safeClick(() => shouldCancel() ? null : confirmButton, {
-      beforeMin: 400,
-      beforeMax: 750,
-      afterMin: 700,
-      afterMax: 1100,
-      shouldCancel,
-    }))) throw new Error('통발 설치 확인에 실패했습니다.');
-    const installed = await Core.waitFor(
-      () => {
-        const button = Core.findButtonByText('통발 설치 중');
-        return button && button.disabled ? true : null;
-      },
-      8000,
-      250,
-      shouldCancel
-    );
-    if (!installed) throw new Error('통발 재설치 상태를 확인하지 못했습니다.');
-    Core.log(moduleId, '통발 설치 완료');
-    return { stopped: false, collected, installed: true, deferred: !collected, townName };
-  };
-
-  Modules.preseasonArena.mainLoop = async function () {
-    this.cycleCount = 0;
-    this.nextFishingAt = Date.now() + PRESEASON_ARENA_FISH_INTERVAL_MS;
-    await this.ensureArena();
-    while (!this.stopRequested) {
-      if (Date.now() >= this.nextFishingAt) {
-        await this.runFishingCycle();
-        this.nextFishingAt = Date.now() + PRESEASON_ARENA_FISH_INTERVAL_MS;
-        if (this.stopRequested) return;
-        await this.ensureArena();
-      } else {
-        await this.ensureArena();
-      }
-
-      const before = Modules.arena.readTodayBattleCount();
-      if (before === null) throw new Error('아레나의 오늘 전투 횟수를 읽지 못했습니다.');
-      const startButton = await this.waitForArenaStart();
-      if (!startButton) {
-        if (this.stopRequested) return;
-        throw new Error('95초 안에 아레나 전투 시작 버튼이 활성화되지 않았습니다.');
-      }
-      if (!(await Core.safeClick(
-        () => {
-          const button = Core.findButtonByText('전투 시작');
-          return button && !button.disabled ? button : null;
-        },
-        { beforeMin: 650, beforeMax: 1150 }
-      ))) throw new Error('프리시즌 아레나 전투 시작 클릭에 실패했습니다.');
-
-      const resultBack = await Core.waitFor(
-        () => Core.findButtonByText('아레나로 돌아가기') || Core.findButtonByText('돌아가기'),
-        15000,
-        400
-      );
-      if (!resultBack) {
-        Core.log('preseasonArena', '결과 화면을 확인하지 못해 아레나 화면부터 다시 확인합니다.');
-        continue;
-      }
-      await Modules.arena.handleResultIfPresent();
-      const after = await Core.waitFor(() => {
-        const count = Modules.arena.readTodayBattleCount();
-        return count !== null && count > before ? count : null;
-      }, 15000, 300);
-      if (after === null) throw new Error('전투 후 오늘 전투 횟수 증가를 확인하지 못했습니다.');
-      this.cycleCount++;
-      Core.updateModuleButtons();
-      const fishingIn = Math.max(0, Math.ceil((this.nextFishingAt - Date.now()) / 60000));
-      Core.log('preseasonArena', `아레나 전투 완료: 오늘 ${after}회 / 다음 통발 작업 약 ${fishingIn}분 후`);
-    }
-  };
-
   function buildPreseasonTab(container) {
-    const mod = Modules.preseason;
-    const refs = UIRefs.preseason;
-
-    const description = document.createElement('div');
-    description.textContent =
-      '이벤트 전체 흐름을 실행합니다: 허수아비 펀치킹(주간 기록 0인 대상만) → 성장 보드 보상 → 심층던전 아레나 → 단풍 토큰 사용. 오늘 또는 주간 토큰 한도에 도달하면 아레나를 마칩니다.';
-    description.style.cssText = 'font-size:11px; color:#ccc; line-height:1.5; margin:7px 0;';
-    container.appendChild(description);
-
-    const note = document.createElement('div');
-    note.textContent = '※ 단독 실행과 일일매크로 모두 같은 이벤트 흐름을 사용합니다. 매 전투 후 오늘/주간 단풍 토큰 증가를 확인합니다.';
-    note.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:7px;';
-    container.appendChild(note);
-
-    const btnRow = document.createElement('div');
-    btnRow.style.cssText = 'display:flex; gap:6px; margin-top:6px; align-items:center;';
-    const startBtn = document.createElement('button');
-    startBtn.textContent = '시작';
-    startBtn.style.cssText = btnStyle('#2e7d32');
-    const stopBtn = document.createElement('button');
-    stopBtn.textContent = '정지';
-    stopBtn.style.cssText = btnStyle('#c62828');
-    stopBtn.disabled = true;
-    const statusEl = document.createElement('span');
-    statusEl.textContent = '대기중';
-    statusEl.style.cssText = 'margin-left:4px; font-size:11px;';
-    startBtn.addEventListener('click', () => Core.startModule('preseason'));
-    stopBtn.addEventListener('click', () => Core.requestStopModule('preseason'));
-    btnRow.append(startBtn, stopBtn);
-    container.append(btnRow, statusEl);
-
-    refs.startBtn = startBtn;
-    refs.stopBtn = stopBtn;
-    refs.statusEl = statusEl;
-    refs.inputs = [];
-
-    // ⚠ 사용자 요청(2026-08): "단풍 토큰"(가을 이벤트) 일괄 사용
-    // 버튼. 자동 반복 매크로가 아니라 눌렀을 때 그 자리에서 바로 실행되는
-    // 1회성 액션이라 시작/정지 상태와 무관하게 별도로 둔다.
-    const tokenBtnRow = document.createElement('div');
-    tokenBtnRow.style.cssText = 'margin-top:10px; padding-top:10px; border-top:1px solid #333;';
-    const tokenLabel = document.createElement('div');
-    tokenLabel.textContent = '단풍 토큰 일괄 사용 (가을 이벤트)';
-    tokenLabel.style.cssText = 'font-size:11px; color:#ccc; margin-bottom:5px;';
-    const tokenBtn = document.createElement('button');
-    tokenBtn.textContent = '단풍 토큰 사용';
-    tokenBtn.style.cssText = btnStyle('#8e5cf7');
-    const tokenStatusEl = document.createElement('span');
-    tokenStatusEl.textContent = '';
-    tokenStatusEl.style.cssText = 'margin-left:8px; font-size:11px; color:#aaa;';
-    tokenBtn.addEventListener('click', async () => {
-      tokenBtn.disabled = true;
-      tokenStatusEl.textContent = '사용 중...';
-      try {
-        const result = await Modules.preseason.useAutumnTokens();
-        if (!result.bounded) throw new Error('단풍 토큰 사용 횟수 한도에 도달해 남은 수량 확인이 필요합니다.');
-        tokenStatusEl.textContent = '완료';
-      } catch (e) {
-        tokenStatusEl.textContent = '실패: ' + e.message;
-        Core.log('preseason', `⚠ 단풍 토큰 사용 실패: ${e.message}`);
-      }
-      tokenBtn.disabled = false;
+    EVENT_BUNDLE_REGISTRY.forEach((bundle) => {
+      const card = document.createElement('section');
+      card.style.cssText = 'margin:0 0 12px; padding:10px; border:1px solid #454545; border-radius:7px; background:#171717;';
+      const heading = document.createElement('div');
+      heading.textContent = bundle.label;
+      heading.style.cssText = 'font-size:13px; font-weight:700; color:#eee; margin-bottom:7px;';
+      card.appendChild(heading);
+      bundle.moduleIds.forEach((moduleId) => {
+        const module = Modules[moduleId];
+        if (!module || typeof module.buildEventBox !== 'function') {
+          throw new Error('EVENT_BUNDLE_RENDERER_UNAVAILABLE:' + bundle.id);
+        }
+        module.buildEventBox(card);
+      });
+      container.appendChild(card);
     });
-    tokenBtnRow.append(tokenLabel, tokenBtn, tokenStatusEl);
-    container.appendChild(tokenBtnRow);
-
-    // 프리시즌 일반 아레나는 보석 일일 한도와 무관하게 계속 돌 수 있으므로
-    // 기존 가을 이벤트 아레나와 실행 상태를 완전히 분리한다. 이 실행 중에는
-    // 30분마다 통발을 수거·재설치하고 다시 아레나로 돌아온다.
-    const infiniteRow = document.createElement('div');
-    infiniteRow.style.cssText = 'margin-top:10px; padding-top:10px; border-top:1px solid #333;';
-    const infiniteLabel = document.createElement('div');
-    infiniteLabel.textContent = '프리시즌 무한아레나 (30분마다 통발 수거·재설치)';
-    infiniteLabel.style.cssText = 'font-size:11px; color:#ccc; margin-bottom:5px;';
-    const infiniteDescription = document.createElement('div');
-    infiniteDescription.textContent = '횟수 제한 없이 일반 아레나를 반복합니다. 다른 화면으로 이동하면 자동 복귀하며, 통발 작업 후에도 아레나로 돌아옵니다.';
-    infiniteDescription.style.cssText = 'font-size:10px; color:#f5a623; line-height:1.45; margin-bottom:7px;';
-    const infiniteBtnRow = document.createElement('div');
-    infiniteBtnRow.style.cssText = 'display:flex; gap:6px; align-items:center;';
-    const infiniteStartBtn = document.createElement('button');
-    infiniteStartBtn.textContent = '무한아레나 시작';
-    infiniteStartBtn.style.cssText = btnStyle('#1565c0');
-    const infiniteStopBtn = document.createElement('button');
-    infiniteStopBtn.textContent = '정지';
-    infiniteStopBtn.style.cssText = btnStyle('#c62828');
-    infiniteStopBtn.disabled = true;
-    const infiniteStatusEl = document.createElement('div');
-    infiniteStatusEl.textContent = '대기중';
-    infiniteStatusEl.style.cssText = 'font-size:11px; color:#ccc; margin-top:5px;';
-    infiniteStartBtn.addEventListener('click', () => Core.startModule('preseasonArena'));
-    infiniteStopBtn.addEventListener('click', () => Core.requestStopModule('preseasonArena'));
-    infiniteBtnRow.append(infiniteStartBtn, infiniteStopBtn);
-    infiniteRow.append(infiniteLabel, infiniteDescription, infiniteBtnRow, infiniteStatusEl);
-    container.appendChild(infiniteRow);
-
-    UIRefs.preseasonArena.startBtn = infiniteStartBtn;
-    UIRefs.preseasonArena.stopBtn = infiniteStopBtn;
-    UIRefs.preseasonArena.statusEl = infiniteStatusEl;
-    UIRefs.preseasonArena.inputs = [];
   }
 
   // -------------------------- 모듈 1: 재전직 --------------------------
@@ -9212,7 +10020,7 @@
   };
 
   Modules.rejob.parseEnergy = function () {
-    const m = Core.bodyText().match(/(\d+)\s*\/\s*2000/);
+    const m = Core.bodyText().match(/(\d+)\s*\/\s*(?:1,?200|2,?000)\b/);
     return m ? parseInt(m[1], 10) : null;
   };
 
@@ -10183,12 +10991,17 @@
     return count;
   };
 
+  // 최대 행동력은 기본 1200, 유료팩 구매 시 2000이다(2026-10-06 사용자 확인: 수면양말 1200).
+  // 두 값만 행동력으로 인정해 HP/MP 같은 다른 분수 표시를 잘못 읽지 않는다.
   Modules.autohunt.readEnergy = function () {
     const parseEnergy = (text) => {
-      const match = String(text || '').replace(/\s+/g, ' ').match(/([\d,]+)\s*\/\s*2,?000\b/);
+      const match = String(text || '').replace(/\s+/g, ' ').match(/([\d,]+)\s*\/\s*(1,?200|2,?000)\b/);
       if (!match) return null;
       const value = this.parseNumber(match[1]);
-      return Number.isFinite(value) && value >= 0 && value <= 2000 ? value : null;
+      const max = this.parseNumber(match[2]);
+      if (!Number.isFinite(value) || value < 0 || value > max) return null;
+      this.lastEnergyMax = max;
+      return value;
     };
     const leaves = this.leafTextEls();
     const label = leaves.find((el) => el.textContent.trim() === '행동력');
@@ -10211,6 +11024,23 @@
     return null;
   };
 
+  // 행동력을 못 읽었을 때 화면에 실제로 보이는 행동력 영역을 남긴다(기록 전용).
+  // 2026-10-05·06 수면양말: 사냥 종료 후 행동력 판독이 매번 실패했고, 판독식이
+  // "/2000"만 인식했다(원인: 최대 1200, 같은 날 수정). 다른 표시 변화에 대비해 기록은 유지한다.
+  Modules.autohunt.describeEnergyArea = function () {
+    const clip = (value, max) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+    const leaves = this.leafTextEls();
+    const label = leaves.find((el) => el.textContent.trim() === '행동력');
+    const fractions = leaves
+      .map((el) => clip(el.textContent, 40))
+      .filter((text) => /[\d,]+\s*\/\s*[\d,]+/.test(text))
+      .slice(0, 6);
+    const area = label
+      ? clip((label.parentElement?.parentElement || label.parentElement || label).textContent, 160)
+      : '행동력 라벨 없음';
+    return `행동력 영역="${area}" / 분수 표시=${fractions.length ? fractions.map((t) => `"${t}"`).join(', ') : '없음'}`;
+  };
+
 
   // 일일/주간 퀘스트는 별도 사냥기를 만들지 않는다. 일일 숙제 점검에서
   // 전투 횟수가 부족할 때 기존 자동사냥 설정(속성/사냥터/층/프리셋)을
@@ -10226,7 +11056,7 @@
 
     const energyBar = [...document.querySelectorAll('[role="progressbar"]')].find((bar) => {
       const label = `${bar.getAttribute('aria-label') || ''} ${bar.parentElement ? bar.parentElement.textContent : ''}`;
-      return label.includes('활력') || /[\d,]+\s*\/\s*2,?000/.test(label);
+      return label.includes('활력') || /[\d,]+\s*\/\s*(?:1,?200|2,?000)/.test(label);
     });
     if (!energyBar) return null;
     let scope = energyBar.parentElement;
@@ -10360,7 +11190,7 @@
       return { ok: false, verified: false, code: 'QUEST_BATTLE_VITALITY_DIALOG_STILL_OPEN', before, after };
     }
 
-    Core.log('autohunt', `숙제 보충: 행동력 부족 ${before}/2000 → 활력의 포션 1개 사용 → ${after}/2000`);
+    Core.log('autohunt', `숙제 보충: 행동력 부족 ${before}/${this.lastEnergyMax || '?'} → 활력의 포션 1개 사용 → ${after}/${this.lastEnergyMax || '?'}`);
     return { ok: true, verified: true, code: 'QUEST_BATTLE_VITALITY_RECOVERED', before, after, used: 1 };
   };
 
@@ -10539,11 +11369,14 @@
       shouldCancel
     );
     const energy = energyReading ? energyReading.value : null;
-    if (energy === null) throw new Error('사냥 종료 후 행동력을 읽지 못함');
-    if (energy >= this.config.minEnergy) {
-      throw new Error(`행동력이 제한 이상으로 남음: ${energy}/2000 (기준 ${this.config.minEnergy})`);
+    if (energy === null) {
+      Core.log('autohunt', `사냥 종료 후 행동력 판독 실패 화면(${location.pathname}): ${this.describeEnergyArea()}`);
+      throw new Error('사냥 종료 후 행동력을 읽지 못함');
     }
-    return `행동력 제한 도달 확인: ${energy}/2000`;
+    if (energy >= this.config.minEnergy) {
+      throw new Error(`행동력이 제한 이상으로 남음: ${energy}/${this.lastEnergyMax} (기준 ${this.config.minEnergy})`);
+    }
+    return `행동력 제한 도달 확인: ${energy}/${this.lastEnergyMax}`;
   };
 
   Modules.autohunt.readGold = function () {
@@ -10974,7 +11807,7 @@
 
       const energy = mod.readEnergy();
       if (energy !== null && energy < mod.config.minEnergy) {
-        Core.notifyCompleted('autohunt', `설정한 행동력 제한 도달(${energy}/2000, 기준 ${mod.config.minEnergy})`);
+        Core.notifyCompleted('autohunt', `설정한 행동력 제한 도달(${energy}/${mod.lastEnergyMax}, 기준 ${mod.config.minEnergy})`);
         break;
       }
 
@@ -11486,6 +12319,19 @@
     ));
   };
 
+  // "일일 던전" 문구가 보인 직후 목록을 읽으면 나머지 카드가 아직 그려지는 중이라 입장권 0개·
+  // 미완료로 읽혔다(2026-10-07 렌더링 감사). 판정 전에 사용 설정된 던전 카드가 모두 보일 때까지
+  // 기다린다. 끝내 일부가 없으면 기존 판정을 그대로 쓰고 빠진 카드 이름을 남긴다.
+  Modules.dungeon.waitForDungeonCards = async function (shouldCancel = Core.defaultShouldCancel) {
+    const expected = this.DUNGEONS.filter((dungeonDef) => !dungeonDef.daily || this.config.enableDailySewer);
+    const missing = () => expected.filter((dungeonDef) => !this.getDungeonCardEl(dungeonDef.label));
+    const rendered = await Core.waitFor(() => (missing().length === 0 ? true : null), 6000, 200, shouldCancel);
+    if (!rendered && !shouldCancel()) {
+      Core.log('dungeon', `⚠ 던전 카드가 6초 안에 보이지 않음: ${missing().map((d) => d.label).join(', ')}`);
+    }
+    return !!rendered;
+  };
+
   Modules.dungeon.scanEligibleDungeons = function () {
     const queue = [];
     for (const dungeonDef of this.DUNGEONS) {
@@ -11519,6 +12365,8 @@
     const arrived = await this.goToDungeonSelect(shouldCancel);
     if (shouldCancel()) throw new Error('사용자가 던전 실행을 정지했습니다.');
     if (!arrived) throw new Error('던전 선택 화면 진입을 확인하지 못함');
+    await this.waitForDungeonCards(shouldCancel);
+    if (shouldCancel()) throw new Error('사용자가 던전 실행을 정지했습니다.');
     const remaining = this.scanEligibleDungeons();
     if (remaining.length > 0) {
       throw new Error(`아직 입장 가능한 던전이 남아 있음: ${remaining.map((d) => d.label).join(', ')}`);
@@ -11576,9 +12424,36 @@
     return match ? parseInt(match[1].replace(/,/g, ''), 10) : 0;
   };
 
+  // Core.bodyText()는 [aria-hidden="true"] 아래 글자를 뺀다. MUI 입장/포션 모달이
+  // 열리면 뒤쪽 화면 전체가 aria-hidden이 되어 상단 행동력 바를 못 읽었다(2026-10-06
+  // 실측: null을 "충분"으로 보고 에너지 300 입장을 헛시도). 여기서는 모달 여부와
+  // 무관하게 매크로 패널 밖의 "N/2,000"(유료팩) 또는 "N/1,200"(기본) 표시를 직접 읽는다.
   Modules.dungeon.parseEntryEnergy = function () {
-    const match = Core.bodyText().match(/(\d+)\s*\/\s*2000/);
-    return match ? parseInt(match[1], 10) : null;
+    const excluded = '#lrm-panel, #lrm-banner, #lrm-boss-ref-panel, script, style, noscript, template';
+    const parse = (text) => {
+      const match = String(text || '').replace(/\s+/g, ' ').match(/([\d,]+)\s*\/\s*(1,?200|2,?000)\b/);
+      if (!match) return null;
+      const value = parseInt(match[1].replace(/,/g, ''), 10);
+      const max = parseInt(match[2].replace(/,/g, ''), 10);
+      return Number.isFinite(value) && value >= 0 && value <= max ? value : null;
+    };
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const parent = node.parentElement;
+      if (!parent || parent.closest(excluded)) continue;
+      const value = parse(node.nodeValue);
+      if (value !== null) return value;
+    }
+    // 숫자와 "/최대치"가 다른 텍스트 노드로 나뉜 경우: 작은 요소 단위로 다시 읽는다.
+    for (const el of document.querySelectorAll('span, div, p')) {
+      if (el.closest(excluded) || el.childElementCount > 3) continue;
+      const text = el.textContent || '';
+      if (text.length > 24) continue;
+      const value = parse(text);
+      if (value !== null) return value;
+    }
+    return null;
   };
 
   Modules.dungeon.findEntryEnergyPlusButton = function () {
@@ -11590,7 +12465,7 @@
 
     const energyBar = [...document.querySelectorAll('[role="progressbar"]')].find((bar) => {
       const label = `${bar.getAttribute('aria-label') || ''} ${bar.parentElement ? bar.parentElement.textContent : ''}`;
-      return label.includes('활력') || /\d+\s*\/\s*2000/.test(label);
+      return label.includes('활력') || /[\d,]+\s*\/\s*(?:1,?200|2,?000)/.test(label);
     });
     if (!energyBar) return null;
     let scope = energyBar.parentElement;
@@ -11747,35 +12622,61 @@
     return true;
   };
 
-  Modules.dungeon.ensureEntryEnergy = async function (entryButton) {
+  Modules.dungeon.closeEntryDialog = async function (entryDialog) {
+    const findCancel = () => [...((entryDialog && entryDialog.isConnected ? entryDialog : document)
+      .querySelectorAll('button'))].find((button) => button.textContent.trim() === '취소'
+        && Core.isElementVisible(button)) || null;
+    if (findCancel()) await Core.safeClick(findCancel, { beforeMin: 300, beforeMax: 700 });
+    return !!(await Core.waitFor(() => (!Core.bodyText().includes('던전 입장 확인') ? true : null), 5000, 250));
+  };
+
+  // 반환: true(충분, 그대로 입장) / 'REFILLED'(입장 창을 닫고 회복함 → 입장 재시도) / false.
+  // 자동사냥 뒤 남는 행동력은 쓸 곳이 없으므로 부족분만 정확히 채운다(사용자 결정 2026-10-06):
+  // 포션 1개로 1개당 회복량을 실측한 뒤 남은 부족분에 필요한 개수만 더 쓴다.
+  Modules.dungeon.ensureEntryEnergy = async function (entryButton, entryDialog = null) {
     const energyCost = this.readEntryEnergyCost(entryButton);
     if (energyCost <= 0) return true;
 
     const currentEnergy = this.parseEntryEnergy();
-    if (currentEnergy === null || currentEnergy >= energyCost) return true;
-
-    Core.log(
-      'dungeon',
-      `입장 행동력 부족(${currentEnergy}/${energyCost}) → 활력의 포션으로 회복 후 다시 입장합니다.`
-    );
-    const potionCount = Math.ceil((energyCost - currentEnergy) / 100);
-    Core.log('dungeon', `활력의 포션 ${potionCount}개 사용 예정 (1개당 행동력 100 회복)`);
-    const recovered = await this.refillEntryEnergy(potionCount, energyCost - 1);
-    if (!recovered) return false;
-
-    const afterEnergy = this.parseEntryEnergy();
-    if (afterEnergy === null || afterEnergy < energyCost) {
-      Core.notifyStopped(
-        'dungeon',
-        `활력의 포션 사용 후에도 입장 행동력이 부족합니다(${afterEnergy ?? '확인 불가'}/${energyCost}).`
-      );
+    if (currentEnergy === null) {
+      Core.log('dungeon', `입장에 행동력 ${energyCost}이 필요하지만 현재 행동력을 읽지 못해 이 입장은 시도하지 않습니다.`);
+      await this.closeEntryDialog(entryDialog);
       return false;
     }
-    Core.log('dungeon', `행동력 회복 완료(${afterEnergy}/${energyCost}) → 던전 입장을 계속합니다.`);
-    return true;
+    if (currentEnergy >= energyCost) return true;
+
+    Core.log('dungeon', `입장 행동력 부족(${currentEnergy}/${energyCost}) → 입장 창을 닫고 부족분만 활력의 포션으로 채웁니다.`);
+    if (!(await this.closeEntryDialog(entryDialog))) {
+      Core.notifyStopped('dungeon', '활력의 포션을 쓰기 위해 던전 입장 확인 창을 닫지 못했습니다.');
+      return false;
+    }
+    if (!(await this.refillEntryEnergy(1, energyCost - 1))) return false;
+    let energy = this.parseEntryEnergy();
+    if (energy === null || energy <= currentEnergy) {
+      Core.notifyStopped('dungeon', `활력의 포션 사용 후 행동력 증가를 확인하지 못했습니다(${energy ?? '확인 불가'}).`);
+      return false;
+    }
+    const perPotion = energy - currentEnergy;
+    for (let round = 0; energy < energyCost && round < 3; round++) {
+      const more = Math.ceil((energyCost - energy) / perPotion);
+      Core.log('dungeon', `활력의 포션 1개당 행동력 ${perPotion} 회복 확인 → 부족분 ${energyCost - energy}에 ${more}개 추가 사용`);
+      if (!(await this.refillEntryEnergy(more, energyCost - 1))) return false;
+      const next = this.parseEntryEnergy();
+      if (next === null || next <= energy) {
+        Core.notifyStopped('dungeon', `활력의 포션 추가 사용 후 행동력 증가를 확인하지 못했습니다(${next ?? '확인 불가'}).`);
+        return false;
+      }
+      energy = next;
+    }
+    if (energy < energyCost) {
+      Core.notifyStopped('dungeon', `활력의 포션 사용 후에도 입장 행동력이 부족합니다(${energy}/${energyCost}).`);
+      return false;
+    }
+    Core.log('dungeon', `행동력 회복 완료(${energy}/${energyCost}) → 던전 입장을 다시 시도합니다.`);
+    return 'REFILLED';
   };
 
-  Modules.dungeon.enterDungeon = async function (dungeonDef) {
+  Modules.dungeon.enterDungeon = async function (dungeonDef, energyRetry = 0) {
     const card = this.getDungeonCardEl(dungeonDef.label);
     if (!card) {
       Core.log('dungeon', `"${dungeonDef.label}" 카드를 찾지 못함`);
@@ -11840,7 +12741,13 @@
           await Core.sleep(1200);
           continue;
         }
-        if (!(await this.ensureEntryEnergy(enterConfirmBtn))) return false;
+        const energyState = await this.ensureEntryEnergy(enterConfirmBtn, entryDialog);
+        if (energyState === false) return false;
+        if (energyState === 'REFILLED') {
+          // 포션은 모달 뒤의 상단 "+"로만 쓸 수 있어 입장 창을 닫았다. 한 번만 처음부터 다시 연다.
+          if (energyRetry >= 1) return false;
+          return this.enterDungeon(dungeonDef, energyRetry + 1);
+        }
         Core.log('dungeon', `입장 방법 선택: "${enterConfirmBtn.textContent.trim()}" (시도 ${attempt}/3)`);
         enterConfirmBtn.click();
         await Core.humanDelay(1100, 2000);
@@ -12663,6 +13570,8 @@
     if (!resumeDungeon) {
       // 이미 위에서 던전 화면(목록)에 도착해 있으므로 다시 메뉴를 누를
       // 필요가 없다.
+      await mod.waitForDungeonCards();
+      if (!mod.running) return;
       queue = mod.scanEligibleDungeons();
       if (queue.length === 0) {
         mod.observeRecoveryEligibilityScan(queue);
@@ -12714,6 +13623,8 @@
         return;
       }
       await mod.goToDungeonSelect();
+      if (!mod.running) return;
+      await mod.waitForDungeonCards();
       if (!mod.running) return;
       queue = mod.scanEligibleDungeons();
       if (queue.length === 0) {
@@ -14509,6 +15420,28 @@
     return await Core.waitFor(() => this.readFloor() !== null, 10000, 500);
   };
 
+  // 어떤 분기에도 맞지 않아 정지할 때, 분기들이 읽는 것과 같은 텍스트와 열린
+  // 대화상자를 남겨 빠진 분기를 로그로 찾을 수 있게 한다(2026-10-06 앙마, 기록 전용).
+  Modules.deepdungeon.describeUnrecognizedScreen = function () {
+    const clip = (value, max) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+      .map((el) => clip(el.innerText || el.textContent, 120))
+      .filter(Boolean)
+      .slice(0, 3);
+    // 화면 앞부분은 캐릭터 상태창이라(2026-10-06 22:00 앙마 40층: 240자가 스탯에서 끊김)
+    // 행동을 고를 수 있는 버튼 목록과 화면 텍스트의 뒷부분을 따로 남긴다.
+    const buttons = Core.allButtons()
+      .filter((b) => Core.isElementVisible(b))
+      .map((b) => `${clip(b.textContent || b.getAttribute('aria-label'), 20)}${b.disabled ? '(비활성)' : ''}`)
+      .filter((label) => label && label !== '(비활성)')
+      .slice(0, 15);
+    const text = clip(Core.bodyText(), 100000);
+    return [
+      `버튼=${buttons.length ? buttons.map((b) => `"${b}"`).join(', ') : '없음'} / 대화상자=${dialogs.length ? dialogs.map((d) => `"${d}"`).join(', ') : '없음'}`,
+      `화면 끝부분="${text.slice(-280)}"`,
+    ];
+  };
+
   Modules.deepdungeon.stepOnce = async function () {
     const text = Core.bodyText();
 
@@ -14551,8 +15484,9 @@
     if (text.includes('보상을 선택하세요')) {
       return await this.handleRewardScreen();
     }
-    if (text.includes('전투 패배')) {
-      // 패배 시에는 보상 없이 "다음 층으로" 버튼만 뜬다.
+    if (text.includes('전투 패배') || text.includes('무승부')) {
+      // 패배 시에는 보상 없이 "다음 층으로" 버튼만 뜬다. 30턴 시간 초과 무승부도 같은
+      // 화면 흐름이다("무승부 (30턴 시간 초과) 다음 층으로 이동하세요.", 2026-10-06 앙마 40층).
       const nextBtn = await Core.retryStep('"다음 층으로" 버튼 찾기', () => Core.findButtonByText('다음 층으로'));
       if (nextBtn) {
         nextBtn.click();
@@ -14705,10 +15639,21 @@
         return { ok: false, verified: false, completeForWeek: false, outcome: 'ACTION_FAILED', code: 'WORLD_BOSS_REWARD_TAB_CLICK_FAILED', states: before.states };
       }
 
+      // 탭 클릭 뒤 고정 대기(0.8~1.3초) 후 한 번만 읽으면 버튼이 그려지기 전이라 0개 클릭으로
+      // 끝나고 검증 실패가 됐다(2026-10-07 렌더링 감사). API가 받을 보상이 남았다고 한 동안은
+      // 버튼이 보일 때까지 기다린다. 끝내 없으면 기존처럼 멈추고 API 재확인이 결과를 정한다.
+      const findWeeklyClaimButton = () => Core.findButtonByText('보상 수령');
       let claimed = 0;
       for (let i = 0; i < 5; i++) {
-        const btn = Core.findButtonByText('보상 수령');
-        if (!btn) break;
+        const btn = claimed < pending.length
+          ? await Core.waitFor(findWeeklyClaimButton, claimed === 0 ? 8000 : 4000, 200)
+          : findWeeklyClaimButton();
+        if (!btn) {
+          if (claimed < pending.length) {
+            Core.log('deepdungeon', `⚠ 던전의 주인 주간 보상: 받을 보상 ${pending.length}개 중 ${claimed}개 클릭 후 "보상 수령" 버튼이 보이지 않음`);
+          }
+          break;
+        }
         if (!(await Core.safeClick(() => Core.findButtonByText('보상 수령'), { beforeMin: 600, beforeMax: 1100, afterMin: 900, afterMax: 1400 }))) break;
         claimed++;
       }
@@ -14947,6 +15892,9 @@
         consecutiveNoProgress += 1;
         if (consecutiveNoProgress >= maxNoProgress) {
           mod.setRecoveryPostconditionObservation('UNRESOLVED', { reasonCode: 'NO_RECOGNIZED_STATE' });
+          for (const line of mod.describeUnrecognizedScreen()) {
+            Core.log('deepdungeon', `인식하지 못한 화면(${location.pathname}) ${line}`);
+          }
           Core.notifyStopped('deepdungeon', '현재 화면을 인식하지 못해 여러 번 대기했습니다. 화면 상태를 확인해주세요.');
           break;
         }
@@ -15675,6 +16623,13 @@
 
       // 목록의 머리 텍스트 인식/클릭과 실제 전투 대상은 별개다. 전투
       // 화면에서 실제 대상을 확인한 뒤에만 공격 루프로 진입한다.
+      // 경로만 바뀐 직후엔 "공격 대상" 줄이 아직 없어 "확인 불가"로 멈췄다(2026-10-07
+      // 렌더링 감사). 대상 줄이 읽힐 때까지 기다린 뒤 같은 검증을 한다.
+      const battleTargetRendered = await Core.waitFor(
+        () => (mod.getBattleTargetHeadName(bossId) ? true : null), 8000, 250
+      );
+      if (!battleTargetRendered) Core.log('guildboss', '⚠ 전투 화면에서 8초 안에 "공격 대상" 줄이 보이지 않음');
+      if (!mod.running || mod.stopRequested) return;
       mod.assertBattleTarget(bossId, headLabel, bossConfig.targetElement);
       Core.log('guildboss', `공격 전 대상 검증 완료: "${headLabel}" (${bossConfig.targetElement} 속성)`);
 
@@ -16233,6 +17188,18 @@
     await this.ensureLegendaryOnlyFilter(runId);
   };
 
+  // 필터 토글·페이지 전환 직후 바로 읽으면 유물 카드나 진행 중 각인 창이 그려지기 전이라 "0/8 유물
+  // 없음"으로 끝나거나 진행 중 각인을 놓쳤다(2026-10-07 렌더링 감사). 카드의 "각인 관리" 버튼이나
+  // 각인 창이 보일 때까지 기다린다. 끝내 없으면 기존 판정을 그대로 쓴다.
+  Modules.relic.waitForRelicListRendered = async function (runId) {
+    const rendered = await Core.waitFor(() => (
+      this.findEngravingPanel() || Core.allButtons().some((button) =>
+        this.normalizeText(button.textContent) === '각인 관리' && Core.isElementVisible(button))
+    ) ? true : null, 6000, 200, () => this.shouldCancel(runId));
+    if (!rendered && !this.shouldCancel(runId)) Core.log('relic', '⚠ 유물 목록이 6초 안에 보이지 않음');
+    return !!rendered;
+  };
+
   Modules.relic.openNextUnengraved = async function (runId) {
     const shouldCancel = () => this.shouldCancel(runId);
     await this.ensureLegendaryOnlyFilter(runId);
@@ -16273,6 +17240,8 @@
         throw new Error(`유물 페이지 탐색 상한 ${RELIC_MAX_PAGES_PER_SCAN}페이지에 도달해 정지했습니다.`);
       }
 
+      await this.waitForRelicListRendered(runId);
+      if (shouldCancel()) break;
       candidate = this.findLegendaryConfiguredCandidate() || this.findLegendaryUnengravedCandidate();
       if (candidate) {
         Core.log(
@@ -16529,6 +17498,7 @@
     });
     this.paymentCount = 0;
     await this.ensureRelicPage(runId);
+    await this.waitForRelicListRendered(runId);
 
     while (!this.shouldCancel(runId)) {
       let opened = false;
@@ -16980,7 +17950,12 @@
   Modules.trainingdecisions.readStatus = async function (runId) {
     this.assertActive(runId);
     if (location.pathname.replace(/\/$/, '') !== '/status') await Core.goToCharacterPage('내 정보', '/status');
-    return this.readStatusDom();
+    // 경로 확인 직후 바로 읽으면 상태 화면이 그려지기 전이라 "이름 0개"로 throw했고, 결정을 쓴 뒤라면
+    // 실행이 중간에 끊겼다(2026-10-07 렌더링 감사). 읽힐 때까지 기다리고, 끝내 안 되면 원래 오류를 낸다.
+    const observed = await Core.waitFor(() => {
+      try { return this.readStatusDom(); } catch (_) { return null; }
+    }, 8000, 250, () => this.shouldCancel(runId));
+    return observed || this.readStatusDom();
   };
 
   Modules.trainingdecisions.observePostClaimStatus = async function (expectedMastery, expectedIdentity, label) {
@@ -17092,6 +18067,13 @@
 
   Modules.trainingdecisions.scanInventoryPages = async function (rowParser, runId) {
     await this.goFirstInventoryPage();
+    // 탭·필터·페이지 전환 직후 바로 읽으면 행이 그려지기 전이라 원석 0개·결정 없음으로 읽었고,
+    // 그 잘못된 재고로 수행 계획을 세웠다(2026-10-07 렌더링 감사). 첫 페이지는 행이 보일 때까지,
+    // 다음 페이지는 목록이 실제로 바뀔 때까지 기다린다.
+    const cancel = () => this.shouldCancel(runId);
+    const visibleRows = () => Core.gameElements('tr').filter((tr) => Core.isElementVisible(tr) && tr.querySelector('td'));
+    const signature = () => visibleRows().map((tr) => String(tr.textContent || '').replace(/\s+/g, ' ').trim()).join('|');
+    await Core.waitFor(() => (visibleRows().length > 0 ? true : null), 6000, 200, cancel);
     const found = [];
     for (let page = 1; page <= 20; page++) {
       this.assertActive(runId);
@@ -17104,8 +18086,15 @@
       );
       if (!next) break;
       if (page === 20) throw new Error('인벤토리가 20페이지를 초과해 부분 스냅샷 사용을 차단했습니다.');
+      const before = signature();
       next.click();
       await Core.humanDelay(180, 320);
+      const changed = await Core.waitFor(() => {
+        const current = signature();
+        return current && current !== before ? true : null;
+      }, 6000, 200, cancel);
+      this.assertActive(runId);
+      if (!changed) throw new Error(`인벤토리 ${page + 1}페이지 목록이 바뀌는 것을 확인하지 못해 부분 스냅샷 사용을 차단했습니다.`);
     }
     await this.goFirstInventoryPage();
     return found;
@@ -18097,7 +19086,10 @@
     mod.runId = (mod.runId || 0) + 1;
     mod.stopRequested = true;
     mod.running = false;
-    if (moduleId === 'dailyquest') mod.stopBossRun?.();
+    // 독립 퀘스트 탭(일간·주간)은 실행 중 보스 실행 허가를 발급받아 개인 보스 숙제를
+    // 처리할 수 있다. 정지하면 그 탭이 발급받은 허가만(stopBossRun) 즉시 회수해, 공유
+    // 실행 잠금이 풀린 뒤 보스 전투가 계속되거나 다음 실행과 겹치지 않게 한다.
+    mod.stopBossRun?.();
     if (Core.activeModuleId === moduleId) Core.activeModuleId = null;
     Core.log(moduleId, '사용자 요청으로 정지합니다...');
     if (moduleId === 'arena') Modules.arena.clearResume();
@@ -18107,6 +19099,11 @@
   // 보스 엔진은 별도 네임스페이스에서 동작하지만 실행 잠금만 통합 코어와
   // 공유한다. 따라서 보스 로직이 던전/심층던전 내부 상태나 함수를 참조하지
   // 않으면서도 두 자동화가 동시에 클릭하는 사고는 방지한다.
+  // coordinator의 역할은 공유 실행 잠금(Core.activeModuleId='boss')의 발급·회수,
+  // 일일 실행 여부 조회·정지 요청, 버튼 갱신 요청뿐이다. 보스 queue/pending·실행
+  // 허가는 보스 엔진이, 일일 실행 상태는 Daily가 소유한다. 이 객체와 lease 상태는
+  // 문서당 한 번(shared core bootstrap 가드) 만들어지며, 다른 모듈이 속성을 덧붙이지
+  // 않는다. 보스 엔진은 호출 시점에 window.__lanisBossCoordinator를 다시 읽는다.
   let bossLeaseSequence = 0;
   let activeBossLeaseId = null;
   window.__lanisBossCoordinator = {
@@ -18180,6 +19177,16 @@
   };
   let activeTab = 'rejob';
 
+  // Bridge 갱신 보류 판단: 매크로가 실행 중이면 Bridge가 이 페이지를 재로드하지 않는다.
+  window.addEventListener('lanis:busy-query', () => {
+    let busy = true;
+    try {
+      busy = !!(Core.dailyActive || Core.activeModuleId ||
+        (typeof window.__bossMacro?.hasActiveRunState === 'function' && window.__bossMacro.hasActiveRunState()));
+    } catch (_) {}
+    document.documentElement.dataset.lanisBusy = busy ? '1' : '0';
+  });
+
   Core.updateModuleButtons = function () {
     ['trainingdecisions', 'rejob', 'relic', 'autohunt', 'dungeon', 'arena', 'preseason', 'dailyquest', 'weeklyquest', 'preseasonArena', 'deepdungeon', 'liberationReroll'].forEach((id) => {
       const mod = Modules[id];
@@ -18248,23 +19255,17 @@
 
     const bossPanel = document.getElementById('lrm-boss-ref-panel');
     if (bossPanel) {
+      // 보스 패널의 버튼·입력 잠금과 보스 실행 흔적(엔진·queue·pending)은 보스
+      // 엔진이 소유한다. 페이지 이동/재개 타이밍에는 코디네이터의 activeModuleId가
+      // 잠깐 풀릴 수 있어 보스 엔진이 자기 실행 상태도 함께 본다. 통합 패널은
+      // 공유 실행 잠금이 보스에 있는지와 다른 모듈·일일 실행 여부만 넘긴다.
       const bossEngine = window.__bossMacro;
-      // 페이지 이동/재개 타이밍에는 코디네이터의 activeModuleId가 잠깐
-      // 풀릴 수 있다. 실제 엔진·저장 큐도 함께 봐야 정지 버튼이 실행
-      // 도중 잘못 비활성화되지 않는다.
-      const bossRunning =
-        Core.activeModuleId === 'boss' ||
-        !!(bossEngine && bossEngine.isRunning) ||
-        !!localStorage.getItem('lrm-boss-ref-queue') ||
-        !!localStorage.getItem('lrm-boss-ref-pending');
-      const anyModuleRunning = !!Core.activeModuleId || Core.dailyActive;
-      const startBtn = bossPanel.querySelector('#lrm-boss-ref-run-queue');
-      const stopBtn = bossPanel.querySelector('#lrm-boss-ref-stop');
-      if (startBtn) startBtn.disabled = anyModuleRunning;
-      if (stopBtn) stopBtn.disabled = !bossRunning;
-      bossPanel.querySelectorAll('#lrm-boss-ref-job, .lrm-boss-check').forEach((input) => {
-        input.disabled = bossRunning;
-      });
+      if (bossEngine && typeof bossEngine.applyPanelRunLock === 'function') {
+        bossEngine.applyPanelRunLock({
+          leaseActive: Core.activeModuleId === 'boss',
+          anyModuleRunning: !!Core.activeModuleId || Core.dailyActive,
+        });
+      }
     }
 
     const dailyRefs = UIRefs.daily;
@@ -18594,49 +19595,11 @@
       buildPanel();
       Core.log('core', '통합 매크로 패널 로드 완료 (수행·결정 / 재전직 / 유물 / 자동사냥 / 재부여 / 던전 / 아레나 / 심층던전 / 보스 / 일일)');
     }
+    // 통합 패널 init은 페이지가 폐기 탭 복원인지 일반 새로고침인지만 가린다.
+    // 각 기능의 실행 상태 재개·폐기 판단은 그 기능이 소유한 공개 함수가 한다.
     if (Core.wasDiscarded) {
-      const state = Modules.daily.loadState();
-      let auth = null;
-      try {
-        auth = JSON.parse(sessionStorage.getItem(DAILY_AUTH_KEY) || 'null');
-      } catch (e) {
-        auth = null;
-      }
-      const canResumeDaily = !!(
-        state &&
-        auth &&
-        auth.schema === DAILY_AUTH_SCHEMA &&
-        auth.startedAt === state.startedAt
-      );
-      if (canResumeDaily) {
-        Modules.daily.stopRequested = false;
-        Core.dailyActive = true;
-        Modules.daily.running = true;
-        Core.backgroundKeeper.acquire('daily');
-        Core.log(
-          'core',
-          `Chrome 폐기 탭 복원 감지: 일일 ${state.index + 1}/${state.steps.length} 단계부터 안전 재개`
-        );
-        Core.sleep(1800)
-          .then(() => Modules.daily.mainLoop())
-          .catch((e) => {
-            Core.showBanner('daily', `폐기 탭 복구 중 오류: ${e.message}`, false);
-            return Modules.daily.finalizeRun({
-              ok: false,
-              stopped: false,
-              message: e && e.message ? e.message : String(e),
-              at: Date.now(),
-            }, state);
-          })
-          .finally(() => { Modules.daily.loopPromise = null; });
-      } else {
-        if (state) {
-          state.running = false;
-          Modules.daily.saveState(state);
-        }
-        sessionStorage.removeItem(DAILY_AUTH_KEY);
-        Core.log('core', 'Chrome 폐기 탭 복원 감지: 유효한 일일 실행 허가가 없어 일일 작업은 중단');
-      }
+      // 일일 허가·실행 상태 검증과 재개는 Daily가 소유한다.
+      Modules.daily.resumeAfterDiscardedTab();
       // 보스 큐는 아래 보스 엔진이 같은 조건(document.wasDiscarded + 현재
       // sessionStorage 허가)을 다시 검증한 뒤에만 재개한다.
       return;
@@ -18644,17 +19607,12 @@
     // 저장값만으로 자동화를 재개하지 않는다. 통합 일일 작업은 SPA 안에서
     // 연속 실행되며, 실제 새로고침/탭 재실행이 발생했다면 안전하게 중단한다.
     // 오래된 running 상태를 복구하면 동일 단계(특히 보스)를 처음부터 다시
-    // 실행해 무한 재도전할 수 있으므로 모두 폐기한다.
+    // 실행해 무한 재도전할 수 있으므로 모두 폐기한다. 보스 pending/queue/정지
+    // 잠금/허가는 같은 로드에서 보스 엔진의 재개 판정(resumePendingIfAny)이
+    // 스스로 폐기하고 통합 패널 표시를 갱신한다(확장 document-start 경로에서는
+    // 이 init보다 먼저, userscript document-idle 경로에서는 이 init 직후).
     Modules.arena.clearResume();
-    sessionStorage.removeItem(DAILY_AUTH_KEY);
-    const staleDaily = Modules.daily.loadState();
-    if (staleDaily) {
-      staleDaily.running = false;
-      Modules.daily.saveState(staleDaily);
-    }
-    localStorage.removeItem('lrm-boss-ref-pending');
-    localStorage.removeItem('lrm-boss-ref-queue');
-    localStorage.setItem('lrm-boss-ref-user-stopped', String(Date.now()));
+    Modules.daily.discardRunAfterReload();
     Core.log('core', '새로고침 후 자동 재개 차단: 저장된 아레나/일일/보스 실행 상태 폐기');
   }
 
@@ -18768,21 +19726,48 @@
       M.isRunning = true;
       M.currentBossPreset = null;
 
+      // 턴이 모자라 더 싸울 수 없는 전투는 포기해야 깎은 체력만큼 보상이 나온다(사용자 확인
+      // 2026-10-06). 포기하지 않으면 전투가 "계속하기"로 남아 매 실행마다 속성돌만 쓰고
+      // 바로 실패했다(룰루비데 망령·앙마 정화자). 턴 예산 소진으로 끝난 경우에만 포기한다.
+      const abandonExhaustedBattle = async () => {
+        const exhausted = M.lastBattleTurnBudgetExhausted;
+        if (!exhausted) return false;
+        if (M.uiLog) {
+          M.uiLog(`🏳 "${entry.label}" 남은 턴(${exhausted.used}/${exhausted.max})으로 진행 불가 → 포기해 깎은 만큼 보상 확보`);
+        }
+        try {
+          await M.abandonCurrentBossAttempt();
+          if (M.uiLog) M.uiLog(`🏳 "${entry.label}" 포기 완료 - 보상은 목록에서 수령`);
+          return true;
+        } catch (error) {
+          if (M.uiLog) M.uiLog(`⚠ "${entry.label}" 포기 실패: ${error.message}`);
+          return false;
+        }
+      };
+
       const runAndReport = async () => {
+        M.lastBattleTurnBudgetExhausted = null;
         try {
           const result = await M[runName]();
           const commonCleared = result && result.cleared
             ? true
             : await M.waitForBossClearEvidence(entry.label);
+          // 오류 없이 미완료로 끝난 전투의 화면(턴·HP·팝업)을 남긴다(기록 전용).
+          if (!commonCleared && M.uiLog && typeof M.describeTurnStallState === 'function') {
+            M.uiLog(`⚠ "${entry.label}" 미완료 종료 화면: ${M.describeTurnStallState()}`);
+          }
+          const abandoned = !commonCleared && await abandonExhaustedBattle();
           return {
             entered: true,
             cleared: commonCleared,
+            ...(abandoned ? { abandoned: true } : {}),
             retryRequired: !!(result && result.retryRequired),
             ...(result && result.retryReason === 'seal-unresolved'
               ? { retryReason: 'seal-unresolved' }
               : {}),
           };
         } catch (error) {
+          if (error.code === 'BOSS_CLEAR_READINESS_FAILED') throw error;
           if (!error.isUserStop && await M.waitForBossClearEvidence(entry.label)) {
             if (M.uiLog) M.uiLog(`✅ "${entry.label}" 클리어 팝업 확인 - 성공 처리`);
             return { entered: true, cleared: true, retryRequired: false };
@@ -18796,9 +19781,35 @@
         }
       };
 
+      // 보상 확인은 어떤 화면에서 시작하든 속성 확인보다 먼저다. 사용자 강제 도전
+      // (forceChallenge)만 보상과 무관하게 진행한다. 보상 상태를 읽지 못하면 null이
+      // 아니라 오류로 멈추고, 확인을 건너뛰는 경우에는 null을 돌려준다.
+      const readRewardBeforeElement = async () => {
+        if (allowClearedBossTest || forceChallenge) return null;
+        const rewardProgress = await M.getWeeklyRewardProgress(entry.label);
+        if (!rewardProgress) {
+          throw new Error(`"${entry.label}" 주간 보상 상태를 읽지 못해 속성 변경 전에 안전하게 중단`);
+        }
+        if (M.uiLog) M.uiLog(`🎁 "${entry.label}" 주간 보상 ${rewardProgress.achieved}/${rewardProgress.total} 확인`);
+        return rewardProgress;
+      };
+
       try {
         if (M.isInBattleScreen(entry.label)) {
           storage.removeItem(pendingKey);
+          let rewardProgress = null;
+          try {
+            rewardProgress = await readRewardBeforeElement();
+          } catch (error) {
+            if (M.uiLog) M.uiLog('⚠ ' + error.message);
+            return { entered: false, cleared: false, error: error.message };
+          }
+          if (rewardProgress && rewardProgress.exhausted) {
+            // 받을 보상이 없으면 속성 확인·속성돌 없이 이미 열린 도전을 포기하고 끝낸다.
+            if (M.uiLog) M.uiLog(`⏭ "${entry.label}"은(는) 주간 보상 소진 - 속성 확인 없이 현재 도전 포기`);
+            await M.abandonCurrentBossAttempt();
+            return { entered: true, cleared: true, alreadyCleared: true, rewardsExhausted: true, abandoned: true };
+          }
           if (M.uiLog) M.uiLog(`✅ 이미 "${entry.label}" 전투 화면, 속성 재확인 후 시작 (${jobOverride || M.getSelectedJob()})`);
           await M.ensureElementForActiveBattle(entry.label);
           M.assertBossRunAuthorized();
@@ -18815,17 +19826,11 @@
         if (path === '/personal-boss') {
           await M.sleep(800);
           try {
-            if (!allowClearedBossTest && !forceChallenge) {
-              const rewardProgress = await M.getWeeklyRewardProgress(entry.label);
-              if (!rewardProgress) {
-                throw new Error(`"${entry.label}" 주간 보상 상태를 읽지 못해 속성 변경 전에 안전하게 중단`);
-              }
-              if (M.uiLog) M.uiLog(`🎁 "${entry.label}" 주간 보상 ${rewardProgress.achieved}/${rewardProgress.total} 확인`);
-              if (rewardProgress.exhausted) {
-                storage.removeItem(pendingKey);
-                if (M.uiLog) M.uiLog(`⏭ "${entry.label}"은(는) 주간 보상 소진 - 속성 변경 없이 완료 처리`);
-                return { entered: true, cleared: true, alreadyCleared: true, rewardsExhausted: true };
-              }
+            const rewardProgress = await readRewardBeforeElement();
+            if (rewardProgress && rewardProgress.exhausted) {
+              storage.removeItem(pendingKey);
+              if (M.uiLog) M.uiLog(`⏭ "${entry.label}"은(는) 주간 보상 소진 - 속성 변경 없이 완료 처리`);
+              return { entered: true, cleared: true, alreadyCleared: true, rewardsExhausted: true };
             }
 
             const otherInProgress = Object.values(bossRegistry)
@@ -18859,6 +19864,7 @@
             const detail = entryOutcome.detail || M.describeBattleEntryState(entry.label);
             throw new Error(`"${entry.label}" 전투 진입 상태를 30초 동안 확정하지 못함: ${detail}`);
           } catch (error) {
+            if (error.code === 'BOSS_CLEAR_READINESS_FAILED') throw error;
             if (M.uiLog) M.uiLog('⚠ ' + error.message);
             return { entered: false, cleared: false, error: error.message };
           }
@@ -20606,6 +21612,20 @@
       const bossLabel = bossRegistry.corruptedPurifier.label;
       const log = [];
       const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+      let verifiedClear = false;
+      const readState = async () => {
+        const state = await M.readBossBattleStateOrClear(bossLabel);
+        if (!state) verifiedClear = true;
+        return state;
+      };
+      const finish = async () => {
+        if (!verifiedClear && !await M.waitForBossClearEvidence(bossLabel)) {
+          throw M.bossClearReadinessFailure('정화자 최종 클리어를 확인하지 못했습니다.');
+        }
+        log.cleared = true;
+        push('완료');
+        return log;
+      };
 
       // 1단계: 봉인 (재도전 포함)
       let sealed = new Set();
@@ -20618,7 +21638,8 @@
         let rounds = 0;
         while (!requiredSeals.every((a) => sealed.has(a)) && rounds < sealRoundsPerAttempt) {
           M.throwIfStopped();
-          const state = M.getHpMpNumbers();
+          const state = await readState();
+          if (!state) return await finish();
           const hpRatio = state.player.hp.cur / state.player.hp.max;
           if (hpRatio < sealLowHpThreshold) {
             await M.clickRecover();
@@ -20662,49 +21683,61 @@
       }
 
       // 3단계: 딜 - HP/MP 기준 회복/공격 반복, 요일별 방깎 기준 이상일 때마다 스크롤 재사용
-      let state = M.getHpMpNumbers();
+      // 전투 턴 한도(150턴)를 넘기면 게임 확인창이 떠 전투와 이후 일일 단계가 모두 막혔다
+      // (2026-10-07 앙마 정화자 딜 106회차). 턴 예산이 모자라면 멈추고, 공통 runner가
+      // 포기해 깎은 만큼 보상을 받는다(사용자 확인: 포기 시 깎은 만큼 보상).
+      const turnBudget = M.createBattleTurnBudget();
+      let state = await readState();
+      if (!state) return await finish();
       let round = 0;
       let turnsSinceScroll = null; // null = 아직 스크롤 안 씀(즉시 사용 가능)
       let scrollExhausted = false;
+      let lastDefDrop = null;
       while (state.boss.hp.cur > 0 && round < maxDealRounds) {
         M.throwIfStopped();
         round++;
         const hpRatio = state.player.hp.cur / state.player.hp.max;
         const mpRatio = state.player.mp.cur / state.player.mp.max;
         if (hpRatio < dealHpThreshold || mpRatio < dealMpThreshold) {
-          await M.clickRecover();
+          if (!(await turnBudget.spend(2, () => M.clickRecover()))) {
+            push(`[딜 ${round}] ⛔ 전투 턴 한도 도달 - 딜 중단`);
+            return { log, cleared: false };
+          }
           push(`[딜 ${round}] HP ${Math.round(hpRatio * 100)}% / MP ${Math.round(mpRatio * 100)}% -> 회복`);
         } else {
           const defDrop = M.getLatestBossDefenseDrop();
+          lastDefDrop = defDrop;
           const scrollReady = !scrollExhausted && (turnsSinceScroll === null || turnsSinceScroll >= scrollDurationTurns);
+          // 전투 기록에 방↓가 없으면(판독값 없음) 기준을 따질 수 없으니 준비될 때마다 쓴다.
+          // 예전에는 이 경우 스크롤을 전혀 쓰지 않아 앙마가 정화자를 못 잡았다(2026-10-07).
           if (
             scrollReady &&
-            defDrop !== null &&
-            defDrop >= effectiveDefenseDropThreshold
+            (defDrop === null || defDrop >= effectiveDefenseDropThreshold)
           ) {
             try {
               await M.useScrolls(['공격']);
-              push(
-                `[딜 ${round}] 방↓${defDrop} >= ${effectiveDefenseDropThreshold} ` +
-                '-> 공격 스크롤 사용'
-              );
+              push(defDrop === null
+                ? `[딜 ${round}] 방↓ 기록 없음 -> 공격 스크롤 사용`
+                : `[딜 ${round}] 방↓${defDrop} >= ${effectiveDefenseDropThreshold} -> 공격 스크롤 사용`);
               turnsSinceScroll = 0;
             } catch (e) {
               scrollExhausted = true;
               push(`[딜 ${round}] 스크롤 사용 실패(소진 추정, 이후 공격만 반복): ${e.message}`);
             }
           }
-          await M.clickTurn(1);
+          if (!(await turnBudget.spend(1, () => M.clickTurn(1)))) {
+            push(`[딜 ${round}] ⛔ 전투 턴 한도 도달 - 딜 중단`);
+            return { log, cleared: false };
+          }
           if (turnsSinceScroll !== null) turnsSinceScroll++;
         }
-        state = M.getHpMpNumbers();
-        push(`[딜 ${round}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+        state = await readState();
+        if (!state) return await finish();
+        push(`[딜 ${round}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max} 방↓=${lastDefDrop ?? '없음'}`);
         if (state.boss.hp.cur <= 0) break;
       }
 
-      await M.closeClearPopupIfAny();
-      push('완료');
-      return log;
+      return await finish();
     };
 
     // ⚠ 사용자 확인(2026-08): 목/토 패턴. 봉인은 월/화/일과 완전히 동일
@@ -20730,6 +21763,20 @@
       const bossLabel = bossRegistry.corruptedPurifier.label;
       const log = [];
       const push = (line) => { log.push(line); if (M.uiLog) M.uiLog(line); };
+      let verifiedClear = false;
+      const readState = async () => {
+        const state = await M.readBossBattleStateOrClear(bossLabel);
+        if (!state) verifiedClear = true;
+        return state;
+      };
+      const finish = async () => {
+        if (!verifiedClear && !await M.waitForBossClearEvidence(bossLabel)) {
+          throw M.bossClearReadinessFailure('정화자 최종 클리어를 확인하지 못했습니다.');
+        }
+        log.cleared = true;
+        push('완료');
+        return log;
+      };
 
       // 1단계: 봉인 (월/화/일 패턴과 완전히 동일)
       let sealed = new Set();
@@ -20742,7 +21789,8 @@
         let rounds = 0;
         while (!requiredSeals.every((a) => sealed.has(a)) && rounds < sealRoundsPerAttempt) {
           M.throwIfStopped();
-          const state = M.getHpMpNumbers();
+          const state = await readState();
+          if (!state) return await finish();
           const hpRatio = state.player.hp.cur / state.player.hp.max;
           if (hpRatio < sealLowHpThreshold) {
             await M.clickRecover();
@@ -20788,7 +21836,11 @@
       // 딱 1번만 하고 → 다시 방깎 프리셋으로 돌아가 반복.
       let scrollExhausted = false;
       let cycle = 0;
-      let state = M.getHpMpNumbers();
+      // 턴 한도 초과 확인창 방지(위 봉인 패턴과 같은 이유). 모자라면 멈추고 runner가 포기한다.
+      const turnBudget = M.createBattleTurnBudget();
+      const outOfTurns = () => { push(`[사이클 ${cycle}] ⛔ 전투 턴 한도 도달 - 딜 중단`); return { log, cleared: false }; };
+      let state = await readState();
+      if (!state) return await finish();
       while (state.boss.hp.cur > 0 && cycle < maxDealRounds) {
         M.throwIfStopped();
         cycle++;
@@ -20800,13 +21852,14 @@
         let defRounds = 0;
         while (defDrop < defenseDropThreshold && defRounds < maxDefRounds) {
           M.throwIfStopped();
-          const s = M.getHpMpNumbers();
+          const s = await readState();
+          if (!s) return await finish();
           const hpRatio = s.player.hp.cur / s.player.hp.max;
           if (hpRatio < defBreakLowHpThreshold) {
-            await M.clickRecover();
+            if (!(await turnBudget.spend(2, () => M.clickRecover()))) return outOfTurns();
             push(`[사이클 ${cycle}, 방깎] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
           } else {
-            await M.clickTurn(5);
+            if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) return outOfTurns();
             defRounds++;
           }
           defDrop = M.getLatestBossDefenseDrop() ?? defDrop;
@@ -20815,7 +21868,8 @@
         if (defDrop < defenseDropThreshold) {
           push(`[사이클 ${cycle}] 경고: 최대 시도 내 방어력감소 ${defenseDropThreshold} 미도달(현재 ${defDrop}), 딜 단계로 진행`);
         }
-        state = M.getHpMpNumbers();
+        state = await readState();
+        if (!state) return await finish();
         if (state.boss.hp.cur <= 0) break;
 
         // 딜 단계: HP 70% 미만 또는 MP 85% 미만이면 조건 맞을 때까지 회복,
@@ -20823,14 +21877,16 @@
         await M.applyBossPreset(dealPresetName);
         push(`[사이클 ${cycle}] "${dealPresetName}" 프리셋 적용`);
         let recoverRounds = 0;
-        state = M.getHpMpNumbers();
+        state = await readState();
+        if (!state) return await finish();
         let hpRatio = state.player.hp.cur / state.player.hp.max;
         let mpRatio = state.player.mp.cur / state.player.mp.max;
         while ((hpRatio < dealHpThreshold || mpRatio < dealMpThreshold) && recoverRounds < 10) {
           M.throwIfStopped();
-          await M.clickRecover();
+          if (!(await turnBudget.spend(2, () => M.clickRecover()))) return outOfTurns();
           recoverRounds++;
-          state = M.getHpMpNumbers();
+          state = await readState();
+          if (!state) return await finish();
           hpRatio = state.player.hp.cur / state.player.hp.max;
           mpRatio = state.player.mp.cur / state.player.mp.max;
           push(`[사이클 ${cycle}, 딜] 회복 ${recoverRounds}회차 - HP ${Math.round(hpRatio * 100)}% MP ${Math.round(mpRatio * 100)}%`);
@@ -20844,14 +21900,13 @@
             push(`[사이클 ${cycle}] 스크롤 사용 실패(소진 추정, 이후 스크롤 없이 진행): ${e.message}`);
           }
         }
-        await M.clickTurn(5);
-        state = M.getHpMpNumbers();
+        if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) return outOfTurns();
+        state = await readState();
+        if (!state) return await finish();
         push(`[사이클 ${cycle}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
       }
 
-      await M.closeClearPopupIfAny();
-      push('완료');
-      return log;
+      return await finish();
     };
 
     // ⚠ 사용자 요청(2026-08): 요일에 따라 서로 다른 공략 패턴(월/화/수/일 vs
@@ -22059,7 +23114,9 @@
           .map((b) => `"${b.textContent.trim()}"`)
           .join(',') || '(버튼 없음)'
     );
-    return `열린 모달 ${dialogs.length}개 버튼: ${texts.join(' | ')}`;
+    // 버튼만으로는 어떤 확인창인지 몰랐다(2026-10-07 앙마 정화자 150턴: "취소","확인"). 문구도 남긴다.
+    const first = String(dialogs[0].textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    return `열린 모달 ${dialogs.length}개 버튼: ${texts.join(' | ')} / 문구: "${first}"`;
   };
 
   M.describeBattleEntryState = (bossLabel) =>
@@ -22578,6 +23635,31 @@
   };
 
   // --- 턴 진행 / 회복 / 스크롤 --------------------------------------------------
+  // 턴 증가를 못 본 순간의 전투 화면 요약(기록 전용). 2026-10-06 앙마 정화자: 5턴 공격 뒤
+  // 10초간 턴도 클리어 팝업도 없어 중단했는데, 패배·팝업·턴 표시 변화 중 무엇인지 남지 않았다.
+  M.describeTurnStallState = () => {
+    const turns = M.queryAll('*')
+      .filter((el) => el.children.length === 0 && M.isVisible(el) && /턴$/.test(el.textContent.trim()))
+      .map((el) => el.textContent.trim().slice(0, 20))
+      .slice(0, 4);
+    let hp = 'HP/MP 판독 불가';
+    try {
+      const s = M.getHpMpNumbers();
+      if (s) hp = `내HP ${s.player.hp.cur}/${s.player.hp.max ?? '?'} 보스HP ${s.boss.hp.cur}/${s.boss.hp.max ?? '?'}`;
+    } catch (_) {}
+    return [`path=${location.pathname}`, `턴표시=${turns.length ? turns.join(',') : '없음'}`, hp, M.describeOpenDialogs()].join(' / ');
+  };
+
+  // 전투가 실패로 끝나면 게임이 "도전 실패 / 보스 처치에 실패했습니다" 확인창(취소·확인)을
+  // 띄운다(2026-10-07 앙마 정화자: 턴 한도 도달). 매크로가 이 창을 몰라 턴만 기다리다
+  // 중단했고, 창이 남아 이후 일일 단계가 모두 "메뉴 못찾음"으로 실패했다.
+  M.findBossFailureDialogConfirm = () => {
+    const dialog = M.queryAll('[role="dialog"], [role="presentation"]').filter(M.isVisible)
+      .find((d) => /도전 실패|처치에 실패/.test(d.textContent || ''));
+    if (!dialog) return null;
+    return [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '확인' && M.isVisible(b)) || null;
+  };
+
   M.waitForBattleTurnAdvance = async (beforeTurn, actionLabel) => {
     if (!beforeTurn) {
       throw new Error(`${actionLabel} 전 현재 전투 턴을 읽지 못해 클릭을 중단합니다.`);
@@ -22588,9 +23670,21 @@
       if (typeof M.findBossClearPopup === 'function' && M.findBossClearPopup()) {
         return { cleared: true };
       }
+      if (M.findBossFailureDialogConfirm()) return { failed: true };
       return null;
     }, 10000, 150);
+    if (advanced && advanced.failed) {
+      // 실패 결과창은 확인으로 닫는다(전투는 이미 끝남). 보상은 목록 단계에서 수령된다.
+      const confirm = M.findBossFailureDialogConfirm();
+      if (confirm) confirm.click();
+      await M.waitFor(() => (M.findBossFailureDialogConfirm() ? null : true), 5000, 200);
+      if (M.uiLog) M.uiLog(`⚠ ${actionLabel} 뒤 "도전 실패" 결과창 확인 - 전투 종료(미처치)`);
+      const error = new Error('보스 도전 실패로 전투가 끝났습니다(결과창 닫음).');
+      error.code = 'BOSS_BATTLE_FAILED';
+      throw error;
+    }
     if (!advanced) {
+      if (M.uiLog) M.uiLog(`⚠ 턴 증가 미확인 화면: ${M.describeTurnStallState()}`);
       throw new Error(
         `${actionLabel} 클릭 후 턴 증가를 확인하지 못했습니다. ` +
         `클릭 누락 가능성이 있어 중복 공격 없이 중단합니다.`
@@ -22672,7 +23766,13 @@
           used = Math.max(used, shown.current);
           max = shown.max || max;
         }
-        if (used + turns > max) return false;
+        if (used + turns > max) {
+          // 예산 부족은 전략이 조용히 "미완료"로 끝나는 경로다. 이어받은 전투의 턴이 이미
+          // 소진됐는지 로그로 보이게 한다(2026-10-06 룰루비데 망령: 계속하기 3초 뒤 미완료).
+          if (M.uiLog) M.uiLog(`⛔ 전투 턴 예산 부족: 사용 ${used} + 요청 ${turns} > 최대 ${max}`);
+          M.lastBattleTurnBudgetExhausted = { used, turns, max };
+          return false;
+        }
         await action();
         used += turns;
         return true;
@@ -22946,6 +24046,13 @@
           text.includes('처치했습니다') &&
           (!bossLabel || text.includes(bossLabel))
         ) {
+          // The text container may precede the actions sibling during render.
+          // Keep the exact clear evidence scoped to its enclosing game dialog.
+          let dialog = node;
+          for (let up = 0; dialog && up < 8; up++, dialog = dialog.parentElement) {
+            const role = dialog.getAttribute && dialog.getAttribute('role');
+            if ((role === 'dialog' || role === 'presentation') && M.isVisible(dialog)) return dialog;
+          }
           return node;
         }
       }
@@ -22953,21 +24060,76 @@
     return null;
   };
 
+  M.bossClearReadinessFailure = (message) => {
+    const error = new Error(message);
+    error.code = 'BOSS_CLEAR_READINESS_FAILED';
+    return error;
+  };
+
+  M.isBossNavigationReady = () => {
+    // Adapt Core.waitForNoOpenDialog's game overlay predicate while preserving
+    // the boss module's macro-panel exclusion and background visibility rules.
+    const openOverlays = M.queryAll('[role="dialog"], [role="menu"], [role="presentation"]')
+      .filter(M.isVisible);
+    if (openOverlays.length) return false;
+    return ['전투', '캐릭'].some((label) => {
+      const button = M.findButtonByText(label);
+      return !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+    });
+  };
+
   M.consumeBossClearPopup = async (bossLabel = '') => {
-    const popup = M.findBossClearPopup(bossLabel);
-    if (!popup) return false;
-    const confirm = [...popup.querySelectorAll('button')]
-      .find((btn) => M.isVisible(btn) && btn.textContent.trim() === '확인');
-    if (confirm) {
-      await M.sleep(350);
-      confirm.click();
+    if (!M.findBossClearPopup(bossLabel)) return false;
+    const findReadyConfirm = () => {
+      const popup = M.findBossClearPopup(bossLabel);
+      if (!popup) return null;
+      return [...popup.querySelectorAll('button')].find((btn) =>
+        M.isVisible(btn) && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' &&
+        btn.textContent.trim() === '확인') || null;
+    };
+    const ready = await M.waitFor(findReadyConfirm, 8000, 150);
+    M.throwIfStopped();
+    if (!ready) throw M.bossClearReadinessFailure('보스 클리어 확인 버튼 준비를 확인하지 못했습니다.');
+    await M.sleep(350);
+    // React can replace the button during the human pause. Never click the
+    // retained node: reread the same exact clear dialog immediately before use.
+    await M.waitFor(findReadyConfirm, 8000, 150);
+    M.throwIfStopped();
+    const confirm = findReadyConfirm();
+    if (!confirm) throw M.bossClearReadinessFailure('보스 클리어 확인 버튼이 변경되어 클릭하지 않았습니다.');
+    try { confirm.click(); } catch (error) {
+      throw M.bossClearReadinessFailure('보스 클리어 확인 클릭 결과가 불명확합니다. 재클릭 없이 중단합니다.');
     }
+    const closed = await M.waitFor(() =>
+      !M.findBossClearPopup() && M.isBossNavigationReady(), 8000, 150);
+    M.throwIfStopped();
+    if (!closed) throw M.bossClearReadinessFailure('보스 클리어 창 닫힘/게임 메뉴 복구를 확인하지 못했습니다. 재클릭 없이 중단합니다.');
     return true;
   };
 
-  // 모든 직업/보스 함수의 최종 안전망. 마지막 공격 직후에는 React가
-  // HP=0과 클리어 모달을 서로 다른 프레임에 반영할 수 있으므로 잠깐
-  // 재확인한다. 팝업 또는 실제 보스 HP 0 중 하나가 확인될 때만 성공이다.
+  // A clear modal hides HP labels with aria-hidden. Read that independent
+  // evidence before HP; a null return here means verified clear+navigation.
+  M.readBossBattleStateOrClear = async (bossLabel) => {
+    const observed = await M.waitFor(() => {
+      if (M.findBossClearPopup(bossLabel)) return { cleared: true };
+      const state = M.getHpMpNumbers();
+      // Purifier's first HP zero is a revival, not final completion. Await
+      // its next live HP state or the authoritative final clear dialog.
+      if (bossLabel === '타락한 정화자' && state && state.boss.hp.cur <= 0) return null;
+      return state ? { state } : null;
+    }, 8000, 150);
+    M.throwIfStopped();
+    if (!observed) throw M.bossClearReadinessFailure('보스 HP/MP와 클리어 상태를 확인하지 못했습니다.');
+    if (observed.cleared) {
+      if (!await M.consumeBossClearPopup(bossLabel)) throw M.bossClearReadinessFailure('보스 클리어 창 상태가 변경됐습니다.');
+      return null;
+    }
+    return observed.state;
+  };
+
+  // 마지막 공격 직후 HP=0과 클리어 모달은 서로 다른 프레임에 반영된다.
+  // 팝업 확인은 닫힘과 enabled 게임 메뉴/overlay 해제까지 검증한다.
+  // 정화자의 HP=0은 부활일 수 있어 최종 클리어 팝업이 반드시 필요하다.
   M.waitForBossClearEvidence = async (bossLabel = '', timeoutMs = 3000) => {
     const evidence = await M.waitFor(() => {
       const popup = M.findBossClearPopup(bossLabel);
@@ -22976,16 +24138,25 @@
       if (state && state.boss && state.boss.hp.cur <= 0) return { type: 'hp-zero' };
       return null;
     }, timeoutMs, 150);
+    M.throwIfStopped();
     if (!evidence) return false;
-    if (evidence.type === 'popup') await M.consumeBossClearPopup(bossLabel);
+    if (evidence.type === 'popup') return await M.consumeBossClearPopup(bossLabel);
+    // HP zero may precede the final modal (or the purifier revival). Give the
+    // final clear dialog time to render instead of racing the next navigation.
+    const popup = await M.waitFor(() => M.findBossClearPopup(bossLabel), 8000, 150);
+    M.throwIfStopped();
+    if (popup) return await M.consumeBossClearPopup(bossLabel);
+    if (bossLabel === '타락한 정화자') return false;
+    if (!M.isBossNavigationReady()) throw M.bossClearReadinessFailure('보스 종료 후 게임 메뉴 복구를 확인하지 못했습니다.');
     return true;
   };
 
   // 클리어 팝업의 "확인" 버튼을 닫아준다 (모달 스코프)
-  M.closeClearPopupIfAny = async () => {
-    await M.sleep(500);
-    const btn = M.findConfirmInOpenDialog(['확인']);
-    if (btn) btn.click();
+  M.closeClearPopupIfAny = async (bossLabel = '') => {
+    const popup = await M.waitFor(() => M.findBossClearPopup(bossLabel), 8000, 150);
+    M.throwIfStopped();
+    if (!popup) return false;
+    return await M.consumeBossClearPopup(bossLabel);
   };
 
   // ⚠ 타락한 정화자 전용(2026-08, 사용자 확인): 금요일은 정화자를 아예 잡을
@@ -23489,6 +24660,13 @@
     }
   };
 
+  // pending/queue 실행 상태 키는 이 엔진이 소유한다. 다른 모듈(통합 패널 버튼
+  // 상태 등)은 키를 직접 읽지 않고 이 읽기 전용 조회로 "보스 실행 흔적이 남아
+  // 있는지"만 묻는다. 의미는 통합 패널이 지금까지 직접 보던 조건과 같다: 엔진이
+  // 실행 중이거나 저장된 queue/pending 값이 있으면 참(값의 형식은 보지 않는다).
+  M.hasActiveRunState = () =>
+    !!M.isRunning || !!localStorage.getItem(QUEUE_KEY) || !!localStorage.getItem(PENDING_KEY);
+
   M.clearBossRunState = (expectedAuthId = null) => {
     // A late callback from a stopped run must not erase a newer explicit
     // start. Callers that own an async queue pass the auth they captured.
@@ -23839,33 +25017,20 @@
   // 호출하고 있었는데, 이 역시 Core가 없는 스코프에서 실행되어 매번
   // ReferenceError로 실패하고 있었다(보스 전투 전 장비 프리셋 적용이 이
   // 함수에 의존하므로, 이게 "보스가 전혀 진행되지 않는" 증상의 실제 원인일
-  // 가능성이 높다). 순수 함수라 로직을 그대로 복사해 온다.
-  M.classifyPresetApplyNotice = function (text, presetName, isExplicitNotice = false) {
-    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
-    if (!normalized) return null;
-    const hasPresetContext =
-      normalized.includes(presetName) ||
-      normalized.includes('프리셋') ||
-      isExplicitNotice;
-    if (!hasPresetContext) return null;
-    if (
-      /(?:실패|오류|적용하지\s*못|불러오지\s*못|적용할\s*수\s*없)/.test(normalized)
-    ) return 'failure';
-    if (
-      /(?:적용했습니다|적용되었습니다|적용\s*완료|불러왔습니다|불러오기\s*완료)/.test(normalized)
-    ) return 'success';
-    return null;
-  };
-
-  M.ELEMENT_TO_TOWN = {
-    불: '베곤',
-    물: '피렌트',
-    번개: '심포니아',
-    바람: '카웬',
-    별: '포트스미스',
-    빛: '에렌시아',
-    어둠: '데자브',
-  };
+  // 가능성이 높다). 2026-10-04부터는 복사본 대신 Core가 공개하는 고정 adapter
+  // (window.__lanisSharedGameRules)에서 완전히 같은 순수 규칙만 받는다. Core
+  // 식별자는 이 스코프에서 참조하지 않는다. DOM 판독·돌 사용/구매 흐름은 아래
+  // 보스 소유 구현을 그대로 쓴다.
+  const sharedGameRules = window.__lanisSharedGameRules;
+  if (
+    !sharedGameRules ||
+    typeof sharedGameRules.classifyPresetApplyNotice !== 'function' ||
+    !sharedGameRules.ELEMENT_TO_TOWN
+  ) {
+    throw new Error('공유 게임 규칙 adapter가 로드되지 않았습니다.');
+  }
+  M.classifyPresetApplyNotice = sharedGameRules.classifyPresetApplyNotice;
+  M.ELEMENT_TO_TOWN = sharedGameRules.ELEMENT_TO_TOWN;
 
   M.readCurrentTown = async () => {
     if (location.pathname.replace(/\/$/, '') !== '/town-move') {
@@ -24016,6 +25181,11 @@
       M.throwIfStopped();
       consumableTab.click();
       await M.humanPause(750, 1300);
+      // 소모품 행이 그려지기 전에 읽으면 돌이 있어도 상점에서 다시 샀다(2026-10-07 렌더링 감사).
+      const inventoryRendered = await M.waitFor(() => (
+        M.queryAll('tr').some((tr) => tr.querySelector('td') && M.isVisible(tr)) ? true : null
+      ), 6000, 200);
+      if (!inventoryRendered && M.uiLog) M.uiLog(`⚠ 소모품 목록이 6초 안에 보이지 않음("${stoneName}" 확인)`);
 
       let useButton = null;
       for (let page = 1; page <= 20 && !useButton; page++) {
@@ -24671,8 +25841,17 @@
     const bossEntry = data.bosses.find((b) => b.name === bossLabel);
     if (!bossEntry) return null;
     const tierLimits = data.weeklyTierLimits[bossEntry.id];
-    if (!tierLimits) return null;
+    // 미확인 입력을 소진으로 추정하지 않는다: 빈 객체는 every()가 참이 되고
+    // remaining:null은 `null <= 0`이 참이 되어, 보상 상태를 모르는데 "소진"으로
+    // 판정됐다. 모든 tier가 숫자 remaining을 가진 경우에만 진행도로 인정하고,
+    // 그 외에는 null(판독 불가)로 돌려 호출자가 전투 전에 중단하게 한다.
+    if (!tierLimits || typeof tierLimits !== 'object' || Array.isArray(tierLimits)) return null;
     const tierKeys = Object.keys(tierLimits);
+    if (tierKeys.length === 0 || tierKeys.some((k) => (
+      !tierLimits[k] || typeof tierLimits[k].remaining !== 'number' || !Number.isFinite(tierLimits[k].remaining)
+    ))) {
+      return null;
+    }
     const achieved = tierKeys.filter((k) => tierLimits[k].remaining <= 0).length;
     const exhausted = tierKeys.every((k) => tierLimits[k].remaining <= 0);
     return {
@@ -24681,6 +25860,22 @@
       exhausted,
       tierLimits,
     };
+  };
+
+  M.bossRewardAdvanced = (before, after) => {
+    if (!after || !after.tierLimits) return false;
+    if (after.exhausted) return true;
+    const beforeTiers = (before && before.tierLimits) || null;
+    if (!beforeTiers) return false;
+    const keys = Object.keys(after.tierLimits);
+    return keys.length > 0 && keys.every((k) => {
+      const now = after.tierLimits[k];
+      const prior = beforeTiers[k];
+      if (!now || typeof now.remaining !== 'number') return false;
+      if (now.remaining <= 0) return true;
+      return !!prior && typeof prior.current === 'number' && typeof now.current === 'number'
+        && now.current > prior.current;
+    });
   };
 
   M.findBossRewardClaimButton = () =>
@@ -24710,6 +25905,12 @@
     if (!ready) throw new Error('보스 목록과 보상 영역의 렌더링을 확인하지 못했습니다.');
     await M.sleep(1200);
     M.throwIfStopped();
+    // 카드가 먼저 그려지면 수령 버튼은 아직 없을 수 있다. 1.2초 뒤 한 번만 보고 "받을 보상
+    // 없음"으로 끝내지 않고 조금 더 기다린다(2026-10-07 렌더링 감사).
+    if (!M.findBossRewardClaimButton()) {
+      await M.waitFor(() => (M.findBossRewardClaimButton() ? true : null), 3000, 200);
+      M.throwIfStopped();
+    }
 
     for (let round = 0; round < 12; round++) {
       const button = M.findBossRewardClaimButton();
@@ -24816,6 +26017,23 @@
     return { entered: true, abandoned: true, bossKey: 'fallenGuardian' };
   };
 
+  // 일일 보스 단계의 판단만 담당한다(화면 조작 없음). 보스별 관측값
+  // { key, label, progress, actionState }를 보상 대상(eligible)·주간 소진·
+  // 오늘 처치 완료·판독 불가로 나눈다. runDailySelectedBosses는 이 결과에
+  // 따라서만 보스 큐, 수호자 필러, 중단 중 하나를 실행한다.
+  M.planDailyBossTargets = (observations) => {
+    const plan = { eligible: [], weeklyExhausted: [], clearedToday: [], unreadable: [] };
+    for (const item of observations) {
+      const cardState = item.actionState && item.actionState.state;
+      if (!item.progress) plan.unreadable.push(item);
+      else if (item.progress.exhausted) plan.weeklyExhausted.push(item);
+      else if (cardState === 'cleared') plan.clearedToday.push(item);
+      else if (cardState === 'uncleared') plan.eligible.push(item);
+      else plan.unreadable.push(item);
+    }
+    return plan;
+  };
+
   M.runDailySelectedBosses = async () => {
     const auth = M.getBossRunAuth();
     M.assertBossRunAuthorized(auth && auth.id);
@@ -24895,11 +26113,16 @@
         actionState,
       });
     }
-    const unreadable = progressBefore.filter((item) => (
-      !item.progress || (!item.progress.exhausted && item.actionState.state === 'unreadable')
-    ));
-    if (unreadable.length) {
-      throw new Error(`주간 보상 횟수를 읽지 못한 보스: ${unreadable.map((item) => item.label).join(', ')}`);
+    const plan = M.planDailyBossTargets(progressBefore);
+    if (plan.unreadable.length) {
+      // 판독 불가는 어떤 전투·필러보다 먼저 멈춘다. 주간 보상 데이터를 못 읽은
+      // 보스와, 보상은 남았지만 카드에서 오늘 처치 여부를 못 읽은 보스를 구분해 남긴다.
+      const rewardUnknown = plan.unreadable.filter((item) => !item.progress).map((item) => item.label);
+      const cardUnknown = plan.unreadable.filter((item) => item.progress).map((item) => item.label);
+      throw new Error([
+        rewardUnknown.length ? `주간 보상 횟수를 읽지 못한 보스: ${rewardUnknown.join(', ')}` : null,
+        cardUnknown.length ? `오늘 처치 여부(보스 카드 상태)를 읽지 못한 보스: ${cardUnknown.join(', ')}` : null,
+      ].filter(Boolean).join(' / '));
     }
     // ⚠ 버그 수정(2026-08, 사용자 확인): 큐에 넣을 보스를 고를 때 주간 보상
     // 소진 여부(exhausted)만 확인하고 "오늘 이미 처치했는지"는 전혀 확인하지
@@ -24911,82 +26134,22 @@
     // 한 번에 받음). 이 누락 때문에 "일일"이 이미 오늘 완전히 처치·보상
     // 수령까지 끝난 보스 3마리를 그대로 다시 큐에 넣어 불필요하게
     // 재처치(전투 스크롤 등 자원 소모)시키는 걸 실전에서 직접 확인함.
-    const remaining = progressBefore
-      .filter((item) => !item.progress.exhausted && item.actionState.state === 'uncleared')
-      .map((item) => item.key);
+    const remaining = plan.eligible.map((item) => item.key);
 
     if (remaining.length === 0) {
       M.assertBossRunAuthorized(auth.id);
 
-      // ⚠ 버그 수정(2026-08, 사용자 확인): 사용자가 체크박스에서 정화자를
-      // 선택 안 했는데도 필러 대체가 실행됐다 - 요일/직업/오늘미처치 조건만
-      // 확인하고 "사용자가 실제로 정화자를 선택했는지"를 빠뜨렸었다.
-      // 사용자가 명시적으로 체크 해제했다면 그 선택을 존중해야 한다.
-      // ⚠ 사용자 요청(2026-08): "필러"(수호자 들어갔다 나오기)로 일일 도전
-      // 과제만 채우던 걸, 조건이 맞으면 실제 정화자 전투로 대체한다 - 이러면
-      // 일일 도전과제도 채워지고 실제 보스 처치·보상도 같이 얻는다. 조건:
-      // (0) 사용자가 체크박스에서 정화자를 선택해뒀음, (1) 오늘 요일에 구현된
-      // 공략 패턴이 있음(월/화/수/일 봉인즉시딜 패턴 + 목/토 방깎 패턴 둘 다
-      // 구현됨, 수요일 번개 딜도 구현됨, 금요일만 미구현), (2) 현재 선택된 직업에 정화자
-      // 로직이 등록돼 있음(현재 검술만), (3) 오늘 정화자를 아직 안 잡았음.
-      // 넷 다 맞으면 필러 대신 실전 투입한다.
-      const purifierUserSelected = loadSelectedBosses().includes('corruptedPurifier');
-      const IMPLEMENTED_PURIFIER_DAYS = [0, 1, 2, 3, 4, 6]; // KST: 일~목, 토 구현 / 금만 제외
-      const todayKstDay = M.getKstDayOfWeek();
-      let purifierRunName = null;
-      try {
-        purifierRunName = M.getRunFunctionName('corruptedPurifier');
-      } catch (e) {
-        purifierRunName = null;
-      }
-      let purifierActionState = { state: 'unreadable', actionText: null };
-      if (
-        purifierUserSelected &&
-        IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) &&
-        purifierRunName
-      ) {
-        await M.ensureBossDifficultyTab(
-          BOSS_REGISTRY.corruptedPurifier.label,
-          { hard: true }
-        );
-        purifierActionState = await M.waitForStableBossCardActionState(
-          BOSS_REGISTRY.corruptedPurifier.label
-        );
-      }
-      if (
-        purifierUserSelected &&
-        IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) &&
-        purifierRunName &&
-        purifierActionState.state === 'uncleared' &&
-        purifierActionState.actionText === '도전하기'
-      ) {
-        if (M.uiLog) {
-          M.uiLog('선택한 보스 전부 처리 완료 → 필러 대신 타락한 정화자 실전 투입(일일 과제+보상 동시 처리)');
-        }
-        await M.enterBossBattle(BOSS_REGISTRY.corruptedPurifier.label, { hard: true });
-        const purifierEntered = await M.waitFor(
-          () => M.isInBattleScreen(BOSS_REGISTRY.corruptedPurifier.label),
-          10000,
-          250
-        );
-        if (!purifierEntered) throw new Error('필러 대체용 정화자 전투 진입을 확인하지 못했습니다.');
-        await M[purifierRunName]();
-        return '선택 보스 주간 보상 소진 확인, 필러 대신 타락한 정화자 실전 처치 완료';
-      }
-
-      if (
-        purifierUserSelected &&
-        IMPLEMENTED_PURIFIER_DAYS.includes(todayKstDay) &&
-        purifierRunName &&
-        purifierActionState.state === 'unreadable' &&
-        M.uiLog
-      ) {
-        M.uiLog('⚠ 정화자 카드 상태를 확정하지 못해 실전 대체 금지 → 수호자 필러로 안전 진행');
-      }
-
-      if (M.uiLog) M.uiLog('선택한 보스 전부 처리 완료(오늘 이미 처치했거나 주간 보상 소진) → 수호자 도전 후 포기');
+      // ⚠ 사용자 요구(2026-10-04): 받을 보상 대상이 없으면 수호자 입장·포기만
+      // 한다. 예전 "필러 대신 정화자 실전 투입"(2026-08)은 정화자 자신의 보상
+      // 잔여를 다시 보지 않고 먼저 입장해, 주간 소진·오늘 처치 완료·보상 미확인
+      // 상태에서도 정화자 전투와 전투 중 속성 확인(속성돌 사용·구매 경로)으로
+      // 이어졌다. 정화자 보상이 남아 있고 오늘 미처치면 위 eligible 큐로 정상
+      // 처치된다. "보상 0"에는 주간 소진과 오늘 처치 완료가 섞이므로 구분해 남긴다.
+      const names = (items) => items.map((item) => item.label).join(', ') || '없음';
+      const summary = `주간 보상 소진: ${names(plan.weeklyExhausted)} / 오늘 처치 완료: ${names(plan.clearedToday)}`;
+      if (M.uiLog) M.uiLog(`선택 보스 중 받을 보상 대상 없음(${summary}) → 수호자 도전 후 포기`);
       await M.runDailyGuardianFiller();
-      return '선택 보스 주간 보상 소진 확인, 수호자 도전 후 포기 완료';
+      return `선택 보스 받을 보상 없음(${summary}), 수호자 도전 후 포기 완료`;
     }
 
     if (M.uiLog) {
@@ -25006,20 +26169,37 @@
       await M.goToBossListViaMenu();
       M.assertBossRunAuthorized(auth.id);
     }
-    const listReadyAfterQueue = await M.waitForBossListReady(remaining);
+    // 남은 보스가 HARD만이면 일반 탭으로 돌아온 목록에서는 그 카드가 안 보여 15초를 기다려도
+    // 통과할 수 없었다(2026-10-07 17:07 앙마, 탭 상태는 미확인). 목록 렌더링은 어느 보스 카드로든
+    // 확인하고, 보상은 이어지는 수령·API 검증이 판단한다.
+    const listReadyAfterQueue = await M.waitForBossListReady();
     if (!listReadyAfterQueue) {
       throw new Error('보스 처치 후 목록과 보상 영역의 렌더링을 확인하지 못했습니다.');
     }
     M.assertBossRunAuthorized(auth.id);
     await M.claimBossRewardsAndVerify();
     M.assertBossRunAuthorized(auth.id);
+    // 단계별 주간 횟수(max)가 2 이상이면 정상 처치 뒤에도 remaining이 남아 exhausted가
+    // 거짓일 수 있다(2026-10-06 실전: 처치한 3마리 모두 오판). 처치 전 판독과 비교해
+    // 모든 단계가 소진됐거나 받은 횟수(current)가 늘었으면 이번 처치 보상으로 인정한다.
+    const beforeByKey = new Map(progressBefore.map((item) => [item.key, item.progress]));
+    // 보스 API 응답은 3초 캐시된다. 보상 수령 직후(0.3초) 검증이 수령 전 캐시를 읽어 처치·수령한
+    // 보스를 "0→0/8 미확인"으로 보고했다(2026-10-07 앙마 정화자). 검증은 항상 새로 읽는다.
+    M._bossApiCache = null;
     const failedChecks2 = await Promise.all(remaining.map(async (key) => {
       const progress = await M.getWeeklyRewardProgress(BOSS_REGISTRY[key].label);
-      return { key, ok: !!(progress && progress.exhausted) };
+      return { key, progress, ok: M.bossRewardAdvanced(beforeByKey.get(key), progress) };
     }));
-    const failed = failedChecks2.filter((c) => !c.ok).map((c) => c.key);
+    const failed = failedChecks2.filter((c) => !c.ok);
     if (failed.length) {
-      throw new Error(`처치 후에도 주간 보상 완료를 확인하지 못함: ${failed.map((key) => BOSS_REGISTRY[key].label).join(', ')}`);
+      // 포기로 받은 부분 보상과 보상 변화 없음을 구분해 남긴다(보상 단계 처치 전→후/전체).
+      const describe = (c) => {
+        const before = beforeByKey.get(c.key);
+        const after = c.progress;
+        const steps = before && after ? ` 보상 ${before.achieved}→${after.achieved}/${after.total}` : '';
+        return `${BOSS_REGISTRY[c.key].label}${steps}`;
+      };
+      throw new Error(`처치 후에도 주간 보상 완료를 확인하지 못함: ${failed.map(describe).join(', ')}`);
     }
     return `보상 잔여 보스 ${remaining.length}종 처치 및 보상 수령 확인`;
   };
@@ -25273,6 +26453,29 @@
     });
     return [...unique];
   };
+  // 보스 패널 DOM은 이 엔진이 소유한다. 일일 시작 검증은 패널을 직접 읽지 않고
+  // 이 공개 조회로 현재 체크된 보스 key만 받는다. 패널이 없으면 []를 돌려준다.
+  M.getPanelCheckedBossKeys = () =>
+    [...document.querySelectorAll('#lrm-boss-ref-panel .lrm-boss-check:checked')]
+      .map((checkbox) => checkbox.value);
+  // 보스 패널의 실행 잠금(시작·정지 버튼, 직업·보스 체크 입력)도 이 엔진이
+  // 소유한다. 통합 패널은 자신만 아는 값(공유 실행 잠금이 보스에 있는지, 다른
+  // 모듈·일일이 실행 중인지)만 넘기고 보스 패널 DOM이나 보스 저장 키를 직접 다루지
+  // 않는다. 규칙은 통합 패널이 지금까지 직접 적용하던 것과 같다. 패널이 없으면
+  // 아무것도 바꾸지 않는다. 엔진 스스로는 호출하지 않는다(통합 패널 전용 공개 함수).
+  M.applyPanelRunLock = ({ leaseActive = false, anyModuleRunning = false } = {}) => {
+    const panel = document.getElementById('lrm-boss-ref-panel');
+    if (!panel) return false;
+    const bossRunning = !!leaseActive || M.hasActiveRunState();
+    const startBtn = panel.querySelector('#lrm-boss-ref-run-queue');
+    const stopBtn = panel.querySelector('#lrm-boss-ref-stop');
+    if (startBtn) startBtn.disabled = !!anyModuleRunning;
+    if (stopBtn) stopBtn.disabled = !bossRunning;
+    panel.querySelectorAll('#lrm-boss-ref-job, .lrm-boss-check').forEach((input) => {
+      input.disabled = bossRunning;
+    });
+    return true;
+  };
 
   function buildPanel(hostOverride = null) {
     const host = hostOverride || document.getElementById('lrm-boss-tool-host');
@@ -25345,6 +26548,13 @@
       div.textContent = line;
       logEl.appendChild(div);
       logEl.scrollTop = logEl.scrollHeight;
+      // Core.log와 같은 기록 전용 이벤트로 Operator 로그에도 남긴다. 보스 모듈은
+      // Core가 없는 별도 IIFE라 그동안 보스 단계 진행이 Operator에서 보이지 않았다.
+      try {
+        window.dispatchEvent(new CustomEvent('lanis:core-log', {
+          detail: JSON.stringify({ moduleId: 'boss', message: String(line).slice(0, 500) }),
+        }));
+      } catch (_) {}
     };
 
     const setRunningState = (running) => {
@@ -25483,25 +26693,24 @@
       localStorage.setItem(STOP_LATCH_KEY, String(Date.now()));
       M.stopRequested = true;
       if (M.uiLog) M.uiLog('■ 새로고침 후 보스 자동 재개 차단 - 사용자가 시작을 눌러야 실행');
+      // 보스 실행 상태 폐기는 이 엔진만 한다. userscript(document-idle) 순서에서는
+      // 위 buildPanel이 폐기 전 상태로 패널을 그렸으므로 폐기 직후 통합 패널 표시를
+      // 한 번 갱신한다. 확장(document-start) 순서에서는 아직 패널이 없어 갱신이
+      // 아무것도 바꾸지 않고, 패널은 뒤의 통합 패널 init이 폐기 후 상태로 그린다.
+      if (window.__lanisBossCoordinator) window.__lanisBossCoordinator.refresh();
       return;
     }
     // 일일 실행 중이라면 일일 오케스트레이터가 기존 큐를 이어받는다.
     // 여기서 동시에 재개하면 같은 보스를 두 루프가 클릭할 수 있다.
-    let dailyState = null;
-    let dailyAuth = null;
-    try {
-      dailyState = JSON.parse(localStorage.getItem('lrm-daily-sequence-state') || 'null');
-      dailyAuth = JSON.parse(sessionStorage.getItem('lrm-daily-explicit-run-auth') || 'null');
-    } catch (e) {
-      dailyState = null;
-      dailyAuth = null;
+    // Daily 저장 상태는 Daily가 소유하므로 Daily의 읽기 전용 공개 조회로만
+    // 묻는다. 조회가 없으면 판단할 수 없으므로 두 루프 충돌을 피하려고
+    // 상태를 건드리지 않고 자동 재개만 보류한다.
+    const dailyRunQuery = window.__lanisDailyRunQuery;
+    if (!dailyRunQuery || typeof dailyRunQuery.ownsDiscardedBossQueue !== 'function') {
+      if (M.uiLog) M.uiLog('■ 일일 실행 상태 조회를 찾지 못해 보스 자동 재개를 보류합니다.');
+      return;
     }
-    if (
-      dailyState &&
-      dailyState.running &&
-      dailyAuth &&
-      dailyAuth.startedAt === dailyState.startedAt
-    ) {
+    if (dailyRunQuery.ownsDiscardedBossQueue()) {
       if (M.uiLog) M.uiLog('⏳ Chrome 폐기 탭 복원: 일일 실행이 보스 큐를 이어받습니다.');
       return;
     }
