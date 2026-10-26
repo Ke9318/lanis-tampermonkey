@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.164-stable
+// @version      1.16.172-stable
 // @description  성장 기능은 현재 게임 탭에서 사용자가 하나씩 직접 호출하고, 전투/일일 기능과 실행 권한을 분리한 통합 패널.
 // @match        https://lanis.me/*
 // @noframes
@@ -13,7 +13,7 @@
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 // Compatibility artifact only. Production update authority is Operator/Bridge local approved releases.
 
-// Ranis Shared Core 1.3.160
+// Ranis Shared Core 1.3.168
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 (function (global) {
   'use strict';
@@ -21,13 +21,13 @@
   global.__lanisSharedCoreBootstrap = function (options = {}) {
     if (global.__lanisSharedCoreAdapter) {
       if (options.mode !== 'headless') {
-        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.160' });
+        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.168' });
         global.__mountLanisUnifiedPanel?.();
         global.__mountLanisBossTool?.();
       }
       return global.__lanisSharedCoreAdapter;
     }
-    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.160' });
+    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.168' });
 (function () {
   'use strict';
 
@@ -1015,19 +1015,22 @@
       );
       if (!arrived) throw new Error('마을 이동 화면으로 진입하지 못했습니다.');
     }
+    // 2026-10-26 live (10/25 패치 뒤): 문구가 "현재 위치: 심포니아 (5, 3)"으로 바뀌었다. 옛 "현재 위치는 X (a, b)"도
+    // 받는다. 이름까지 들어 있는 가장 작은 요소를 고른다(라벨이 따로 쪼개져 있을 수 있음).
+    const TOWN_LOCATION = /현재 위치(?:는|\s*:)\s*([^\s(]+)\s*\(/;
     // ⚠ 실전 확인: "현재 위치는 X (a, b) 입니다." 문구는 안내 문장과 한
     // <p> 안에 <br>로 붙어 있어(리프 노드가 아님), leaf 기준 검색으로는
     // 못 찾는다. includes로 후보를 찾고 그중 가장 작은(자식 적은) 요소의
     // textContent에서 정규식으로 직접 추출한다.
     const match = await Core.waitFor(() => {
-      const candidates = Core.gameElements('*').filter((e) => e.textContent.includes('현재 위치는'));
+      const candidates = Core.gameElements('*').filter((e) => TOWN_LOCATION.test(e.textContent));
       if (!candidates.length) return null;
       const smallest = candidates.reduce(
         (best, el) =>
           !best || el.querySelectorAll('*').length < best.querySelectorAll('*').length ? el : best,
         null
       );
-      return smallest.textContent.match(/현재 위치는\s*(\S+)\s*\(/);
+      return smallest.textContent.match(TOWN_LOCATION);
     }, 8000, 250);
     if (!match) throw new Error('현재 위치 텍스트를 찾지 못했습니다.');
     return match[1];
@@ -1744,16 +1747,20 @@
     );
     for (const dialog of dialogs) {
       const text = dialog.textContent.replace(/\s+/g, ' ').trim();
+      // 2026-10-17 게임 변경: 최종 확인창이 '사용 확인 … 정말 … [확인]'에서
+      // '아이템 사용 확인 · 장비용 기름을(를) 사용하시겠습니까? … [사용]' 계열로 바뀌었다.
+      // 못 알아보면 확인창이 열린 채 남아 상단 메뉴를 가린다(미나·돈땃쥐미·커피).
       const hasUseConfirmHeading = [...dialog.querySelectorAll('h1, h2, h3, h4, h5, h6')]
-        .some((heading) => heading.textContent.trim() === '사용 확인');
+        .some((heading) => /^(아이템\s*)?사용 확인$/.test(heading.textContent.trim())) ||
+        /^(아이템\s*)?사용 확인/.test(text);
       if (
         !hasUseConfirmHeading ||
         !text.includes(Core.EQUIPMENT_OIL_NAME) ||
-        !text.includes('정말')
+        !(text.includes('정말') || text.includes('사용하시겠습니까'))
       ) continue;
       const buttons = [...dialog.querySelectorAll('button')].filter(
         (button) =>
-          button.textContent.trim() === '확인' &&
+          ['확인', '사용'].includes(button.textContent.trim()) &&
           Core.isElementVisible(button) &&
           !button.disabled
       );
@@ -1918,11 +1925,18 @@
         throw new Error(`"${category}" 장비에 기름을 바르는 최종 버튼 클릭에 실패했습니다.`);
       }
 
+      // 선택창이 먼저 닫히고 확인창이 뒤따라 뜰 수 있으므로, 닫힘만 보고 바로
+      // 넘어가지 않고 잠시 더 확인창을 기다린다.
+      let selectionClosedAt = null;
       const secondaryConfirm = await Core.waitFor(
-        () => Core.findEquipmentOilSecondaryConfirm(selectionDialog) || (
-          !selectionDialog.isConnected || !Core.isElementVisible(selectionDialog) ? true : null
-        ),
-        1800,
+        () => {
+          const confirm = Core.findEquipmentOilSecondaryConfirm(selectionDialog);
+          if (confirm) return confirm;
+          if (selectionDialog.isConnected && Core.isElementVisible(selectionDialog)) return null;
+          selectionClosedAt = selectionClosedAt ?? Date.now();
+          return Date.now() - selectionClosedAt >= 1200 ? true : null;
+        },
+        3000,
         120,
         shouldCancel
       );
@@ -1942,6 +1956,8 @@
       }
 
       const applied = await Core.waitFor(() => {
+        // 확인창이 아직 열려 있으면 그 문구('기름 … 사용')가 완료 신호로 오인될 수 있다.
+        if (Core.findEquipmentOilSecondaryConfirm(selectionDialog)) return null;
         const freshRow = Core.findEquipmentOilRow();
         const countAfter = Core.readEquipmentOilCount(freshRow);
         if (countBefore !== null) {
@@ -3940,8 +3956,11 @@
         throw new Error('"단풍 토큰" 사용 버튼 클릭에 실패했습니다.');
       }
 
+      // 2026-10-26 live: the confirm now reads "단풍 토큰을 사용하시겠습니까?" (until 10/25 "단풍 토큰을(를) …").
+      // The old-only match left the dialog open and the later Daily steps lost the top menu.
+      const isTokenConfirm = (d) => Core.isElementVisible(d) && /단풍 토큰을(?:\(를\))?\s*사용하시겠습니까/.test(d.textContent);
       const dialog = await Core.waitFor(
-        () => Core.gameElements('[role="dialog"]').find((d) => Core.isElementVisible(d) && d.textContent.includes('단풍 토큰을(를) 사용하시겠습니까')) || null,
+        () => Core.gameElements('[role="dialog"]').find(isTokenConfirm) || null,
         6000,
         250,
         shouldCancel
@@ -3950,15 +3969,16 @@
 
       // ⚠ 수량 입력칸은 이미 1회 사용 최대치로 채워져 있다 - 절대 건드리지 않는다.
       const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
-      if (!confirmBtn) throw new Error('"단풍 토큰" 사용 확인 버튼을 찾지 못했습니다.');
+      if (!confirmBtn) {
+        const labels = [...dialog.querySelectorAll('button')].map((b) => b.textContent.trim()).filter(Boolean);
+        throw new Error(`"단풍 토큰" 사용 확인 버튼을 찾지 못했습니다. (버튼: ${labels.join(', ') || '없음'})`);
+      }
       if (confirmBtn.disabled) throw new Error('"단풍 토큰" 사용 확인 버튼이 비활성화 상태입니다.');
       if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400, shouldCancel }))) {
         throw new Error('"단풍 토큰" 사용 클릭 결과를 확인하지 못했습니다. 재클릭하지 않습니다.');
       }
       const confirmed = await Core.waitFor(() => {
-        const openDialog = Core.gameElements('[role="dialog"]').some((d) =>
-          Core.isElementVisible(d) && d.textContent.includes('단풍 토큰을(를) 사용하시겠습니까')
-        );
+        const openDialog = Core.gameElements('[role="dialog"]').some(isTokenConfirm);
         if (openDialog) return null;
         const current = findTokenRow();
         if (!current) return true;
@@ -5513,6 +5533,90 @@
   // 현재 DOM은 과거 단일 "마을 효과 명성 받기" 문구를 더 이상 쓰지 않고
   // label/amount/button을 분리한다. 전역 "받기"는 다른 보상을 오수령할 수
   // 있으므로 반드시 semantic row에 scope한다.
+  // 내 정보(/status) 상단 카드의 "○○ 팩" 배지에 마우스를 올리면 남은 날짜가 안내문으로 뜬다
+  // (2026-10-09 사용자 확인: 연이 "부스터 팩", "컴포트 팩"). 클릭하지 않고 읽기만 한다.
+  // 안내문 구조는 실전 미확인이라, 못 읽으면 배지 속성을 함께 남겨 다음 수정 근거로 쓴다.
+  Modules.daily.recordPackRemaining = async function () {
+    const clean = (el) => (el?.textContent || '').replace(/\s+/g, ' ').trim();
+    // 2026-10-10 앙마·돈땃쥐미·룰루비데: Daily 직후 상단 "캐릭" 메뉴를 "찾을 수 없음"으로 바로 실패했다.
+    // Core.waitFor/clickNavMenuExact의 기본 취소 판정은 Core.runContext(마지막 하위 모듈)를 보는데,
+    // 그 모듈은 이미 끝나 취소로 판정된다. 이 기록은 Daily 정지 요청만으로 취소한다.
+    const keep = () => !!this.stopRequested;
+    const openDialogs = () => [...document.querySelectorAll('[role="dialog"], [role="menu"], [role="presentation"]')]
+      .filter((el) => Core.isElementVisible(el));
+    // 2026-10-10 라시에: 남아 있던 것은 대화상자가 아니라 앞 단계에서 열린 채 남은 상단 메뉴
+    // (길드·게시판·편지·…·로그아웃)였다. 메뉴는 배경 클릭으로 닫고 다시 기다린다.
+    if (openDialogs().length) {
+      Core.closeOpenMenus();
+      await Core.humanDelay(400, 700);
+    }
+    if (!(await Core.waitFor(() => (openDialogs().length === 0 ? true : null), 5000, 250, keep))) {
+      const open = openDialogs().map((el) => clean(el).slice(0, 60));
+      Core.log('daily', `팩 남은 기간 확인 생략: 열린 창이 남아 있음 (${open.join(' | ') || '문구 없음'})`);
+      return [];
+    }
+    await Core.clickNavMenuExact('캐릭', '내 정보', keep);
+    const arrived = await Core.waitFor(() => location.pathname.replace(/\/$/, '') === '/status' || null,
+      10000, 250, keep);
+    if (!arrived) throw new Error('캐릭 메뉴 "내 정보" 이동 확인 실패');
+    // 2026-10-14: 10/10부터 모든 캐릭터에서 "부스터 팩"만 읽혔고 "컴포트 팩"은 한 번도
+    // 기록되지 않았다(프리셋 전환이 되는 캐릭터도 포함). 배지 이름의 공백 유무와 아이콘
+    // 자식을 허용하고, 매칭이 하나 이하이면 "팩"이 들어간 짧은 문구를 진단으로 남긴다.
+    // 2026-10-14 06:45 수면양말 실측: 컴포트 팩 배지 문구는 "💎 컴포트 팩"(이모지 접두). 글자가 아닌
+    // 접두 기호(이모지·기호 1~3개)를 허용한다.
+    const badgeText = /^(?:[^\s가-힣A-Za-z0-9]{1,3}\s*)?[가-힣A-Za-z]{1,10}(?: ?[가-힣A-Za-z]{1,10})? ?팩$/u;
+    const isBadge = (el) => el.children.length <= 3 && Core.isElementVisible(el) && badgeText.test(clean(el));
+    const badges = await Core.waitFor(() => {
+      const found = Core.gameElements('div, span, p, button').filter(isBadge);
+      const innermost = found.filter((el) => !found.some((other) => other !== el && el.contains(other)));
+      return innermost.length ? innermost : null;
+    }, 4000, 250, keep);
+    if (!badges || badges.length < 2) {
+      const candidates = [...new Set(Core.gameElements('div, span, p, button')
+        .filter((el) => Core.isElementVisible(el) && el.children.length <= 3)
+        .map((el) => clean(el))
+        .filter((text) => text && text.length <= 16 && text.includes('팩')))].slice(0, 12);
+      Core.log('daily', `팩 배지 후보 문구: ${candidates.join(' | ') || '없음'}`);
+    }
+    if (!badges) {
+      Core.log('daily', '팩 남은 기간: 내 정보에 팩 표시 없음');
+      return [];
+    }
+    const remainingPattern = /(남은|남음|만료|\d+\s*일|\d+\s*시간)/;
+    const results = [];
+    for (const badge of badges) {
+      const name = clean(badge);
+      const before = new Set(Core.gameElements('div, span, p').filter((el) => Core.isElementVisible(el)));
+      for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter']) {
+        badge.dispatchEvent(new MouseEvent(type, { bubbles: type.endsWith('over'), cancelable: true, view: window }));
+      }
+      const tooltip = await Core.waitFor(() => (
+        Core.gameElements('[role="tooltip"]').find((el) => Core.isElementVisible(el) && clean(el)) ||
+        Core.gameElements('div, span, p').find((el) => !before.has(el) && Core.isElementVisible(el) &&
+          el.children.length === 0 && remainingPattern.test(clean(el))) || null
+      ), 2000, 150, keep);
+      // 2026-10-14 07:15 이라: 컴포트 팩 안내문은 혜택 목록이 길어 80자 절단에 남은 기간이 잘렸다.
+      // "N일 N시간 N분 남음" 같은 기간 문구를 먼저 뽑고, 없으면 안내문 앞부분을 남긴다.
+      const full = tooltip ? clean(tooltip) : '';
+      // "(오늘: 3/3회 남음)" 같은 다른 "남음"은 제외: 일·시간·분 단위가 붙은 기간만, 마지막 것을 쓴다.
+      const remainingMatches = [...full.matchAll(/\d+\s*일(?:\s*\d+\s*시간)?(?:\s*\d+\s*분)?\s*남음|\d+\s*시간(?:\s*\d+\s*분)?\s*남음|\d+\s*분\s*남음|만료(?:됨|됐습니다)?/g)];
+      const remainingText = remainingMatches.length ? remainingMatches[remainingMatches.length - 1][0] : '';
+      const text = remainingText ? remainingText.replace(/\s+/g, ' ').trim() : full.slice(0, 80);
+      for (const type of ['pointerout', 'pointerleave', 'mouseout', 'mouseleave']) {
+        badge.dispatchEvent(new MouseEvent(type, { bubbles: type.endsWith('out'), cancelable: true, view: window }));
+      }
+      const attrs = ['title', 'aria-label', 'data-tooltip', 'aria-describedby']
+        .map((key) => (badge.getAttribute(key) ? `${key}=${badge.getAttribute(key)}` : null))
+        .filter(Boolean).join(' ').slice(0, 80);
+      results.push({ name, text });
+      Core.log('daily', text
+        ? `팩 남은 기간: ${name} → ${text}`
+        : `팩 남은 기간: ${name} → 안내문 못 읽음${attrs ? ` (${attrs})` : ''}`);
+      await Core.humanDelay(300, 600);
+    }
+    return results;
+  };
+
   Modules.daily.runGuildTownReputationJob = async function (shouldCancel = () => false) {
     if (shouldCancel()) return { ok: true, stopped: true, verified: false, outcome: 'STOPPED', code: 'STOPPED', message: '길드 마을효과 명성: 사용자가 실행을 정지했습니다.' };
     try {
@@ -5540,7 +5644,9 @@
       findClaimBtn() || Core.gameElements('p, span, div').some((element) =>
         Core.isElementVisible(element) && normalizedText(element) === '마을 효과 명성')
     ) ? true : null, 6000, 200, shouldCancel);
-    if (!reputationRendered) Core.log('daily', '⚠ 길드 마을효과 명성: 6초 안에 명성 행이 보이지 않음');
+    // 받을 명성이 없는 날은 행 자체가 없다(2026-10-07·09 등 수령은 10/06·10/08뿐). 렌더 지연과 구분할
+    // 고정 기준 요소를 확인하기 전까지는 경고(⚠)가 아닌 기록으로만 남긴다.
+    if (!reputationRendered) Core.log('daily', '길드 마을효과 명성: 6초 대기 동안 명성 행 없음');
     const claimBtn = findClaimBtn();
     if (!claimBtn) {
       return { ok: true, skipped: true, verified: true, outcome: 'ALREADY_DONE', code: 'GUILD_TOWN_REPUTATION_NOT_AVAILABLE', message: '길드 마을효과 명성: 받을 것 없음(이미 받았거나 없음)' };
@@ -5906,6 +6012,8 @@
     Core.dailyActive = true;
     this.running = true;
     Core.updateModuleButtons();
+    // Operator 예상 행동력 계산용 시작 기록(첫 단계 전, 기록 전용).
+    if (state.index === 0) Modules.autohunt?.recordEnergy?.('daily', '시작');
 
     while (state.running && state.index < state.steps.length && !this.stopRequested) {
       const step = state.steps[state.index];
@@ -6008,6 +6116,13 @@
       return this.finalizeRun(result, state);
     }
 
+    // 기록 전용: 유료팩 남은 기간(2026-10-09 사용자 요청). 실패해도 Daily 결과에 영향 없음.
+    try {
+      await this.recordPackRemaining();
+    } catch (error) {
+      Core.log('daily', `팩 남은 기간 확인 생략: ${error.message}`);
+    }
+
     const issues = state.reports.filter((report) => !report.ok);
     const warnings = state.reports.filter((report) => report.warning);
     const summary = state.reports
@@ -6053,11 +6168,15 @@
       Core.showBanner('daily', Core.moduleResults.daily.message, false, 'issues');
       Core.playStopSound();
     }
-    alert(`일일 연속 실행 결과\n\n${summary || '실행한 작업 없음'}`);
+    // alert()는 확인을 누를 때까지 페이지를 멈춘다. Operator(스케줄러) 실행에서 창이 앞에 있으면
+    // 결과 보고가 확인 클릭까지 막혔다(2026-10-09 룰루비데 17:56→17:58:59). 관리 실행은 배너·로그만 남긴다.
+    if (!this.managedRun) alert(`일일 연속 실행 결과\n\n${summary || '실행한 작업 없음'}`);
     return this.finalizeRun(Core.moduleResults.daily, state);
   };
 
   Modules.daily.finalizeRun = function (result, state = null) {
+    // Operator 예상 행동력 계산용 종료 기록(기록 전용).
+    Modules.autohunt?.recordEnergy?.('daily', '종료');
     const persisted = state || this.loadState();
     const arenaObservation = this.lastArenaObservation || persisted?.arenaObservation;
     if (arenaObservation) result.arenaObservation = arenaObservation;
@@ -6123,6 +6242,7 @@
       ? options.recoveryObservation
       : Core.beginDirectRecoveryObservation?.('daily', 'Core.startDaily') || null;
     mod.managedRecoveryObservation = recoveryObservation;
+    mod.managedRun = hasProvidedRecoveryObservation;
     const rejectRecoveryStart = (code) => {
       Core.rejectManagedRecoveryObservation?.(recoveryObservation, code);
       mod.managedRecoveryObservation = null;
@@ -8135,12 +8255,17 @@
     ).length;
   };
 
+  // 2026-10-25 실화면(호비 주간 탭): "주간 퀘스트 보상 · 7개 달성 시 수령 가능 7/8 · 8개 중 7개 완료 시".
+  // 어느 7개든 된다(낚시광 6/10 미완료로 수령 완료 확인). 10/03 문서의 '길드의 용사 필수'는
+  // 화면에 없는 조건이라 뺐다.
+  Modules.daily.WEEKLY_QUEST_REWARD_THRESHOLD = 7;
   Modules.daily.weeklyQuestRewardEligible = function (audit) {
     if (!this.questAuditReadable(audit)) return false;
-    const guild = audit.progress['길드의 용사'];
-    return !!(guild && Number.isInteger(guild.current) && Number.isInteger(guild.target) &&
-      guild.target > 0 && guild.current >= guild.target &&
-      this.weeklyQuestCompletedCount(audit) >= 7);
+    // 8줄을 모두 읽었을 때만 판단한다(한 줄이라도 못 읽었으면 보상 판단 보류).
+    const rows = Object.values(audit.progress);
+    if (rows.length !== 8 || !rows.every((row) => row && Number.isInteger(row.current) &&
+        Number.isInteger(row.target) && row.target > 0)) return false;
+    return this.weeklyQuestCompletedCount(audit) >= this.WEEKLY_QUEST_REWARD_THRESHOLD;
   };
 
   Modules.daily.weeklyQuestRecoveryDue = function (kstDay = Core.getKstDayOfWeek()) {
@@ -8458,8 +8583,15 @@
     const finalDaily = scopes.daily
       ? await runSubTask('일간 8개 숙제 최종 확인', () => auditScope('일간', dailyAudit))
       : null;
+    // 보상 기준(7/8)을 넘었으면 남은 한 항목(예: 낚시광)은 정상이다 — 이슈로 올리지 않는다.
     const finalWeekly = scopes.weekly
-      ? await runSubTask('주간 8개 숙제 최종 확인', () => auditScope('주간', weeklyAudit))
+      ? await runSubTask('주간 8개 숙제 최종 확인', async () => {
+        const audit = await auditScope('주간', weeklyAudit);
+        if (!this.weeklyQuestRewardEligible(audit) || audit.outcome !== 'INCOMPLETE') return audit;
+        // remember: the reward claim reuses this reading instead of opening the weekly tab again
+        return reuse.remember({ ...audit, outcome: 'REWARD_THRESHOLD_MET', code: 'WEEKLY_QUEST_REWARD_THRESHOLD_MET',
+          message: `${this.weeklyQuestCompletedCount(audit)}/8 (보상 기준 7개 충족, 남은 항목: ${audit.message || '-'})` }, '주간');
+      })
       : null;
 
     // 일간 보상은 "8개 모두 완료"가 아니라 게임 화면의 실제 보상 control이
@@ -9263,6 +9395,7 @@
 
   const ARENA_RECOVERY_POSTCONDITION_SCHEMA = 'recovery.arena-postcondition.v1';
   const ARENA_RECOVERY_POSTCONDITION_CONTRACT = 'arena-gem-energy-page-observation-v1';
+  const ARENA_REPEATED_ERROR_LIMIT = 3;
 
   Modules.arena.emitRecoveryProgress = function (code, details) {
     try { Core.emitRecoveryFeatureProgress?.('arena', code, details); } catch (_) {}
@@ -9330,7 +9463,17 @@
     return new Date().toLocaleDateString('en-CA');
   };
 
+  // 2026-10-23 live arena page: "토요일 10시 ~ 목요일 22시에 전투 가능". The registration-stage
+  // screens carry no hours, and the old weekend-only gate skipped 라시에's 직업군 미등록 screen
+  // on Tue~Thu 10/20~10/22 as "운영일이 아님" (3 days of 150 gems lost).
+  Modules.arena.OPEN_WINDOW = { from: 6 * 1440 + 10 * 60, to: 4 * 1440 + 22 * 60, evidence: '토요일 10시 ~ 목요일 22시' };
+
   Modules.arena.isOpenAtKst = function (date = new Date()) {
+    return this.isInsideWindowKst(this.OPEN_WINDOW, date);
+  };
+
+  // only for the old weekend-only notice wording ("토요일과 일요일에만 …")
+  Modules.arena.isWeekendOpenAtKst = function (date = new Date()) {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: 'Asia/Seoul',
       weekday: 'short',
@@ -9346,17 +9489,68 @@
       (parts.weekday === 'Sun' && minuteOfDay <= 22 * 60);
   };
 
+  // "토요일 10시부터 목요일 22시까지" / "토요일 10시 ~ 목요일 22시" on the arena page -> week window.
+  Modules.arena.readPageOpenWindow = function (text) {
+    const DAYS = { 일: 0, 월: 1, 화: 2, 수: 3, 목: 4, 금: 5, 토: 6 };
+    const match = String(text || '').match(
+      // only the two live phrasings (and the old "…에만") count - another day range on the page must not
+      // decide the arena hours (independent review 2026-10-23)
+      /([월화수목금토일])요일\s*(\d{1,2})시\s*(?:부터|[~～\-–—])\s*([월화수목금토일])요일\s*(\d{1,2})시\s*(?:까지\s*연속\s*개방|에\s*전투\s*가능|에만)/
+    );
+    if (!match) return null;
+    return {
+      from: DAYS[match[1]] * 1440 + Number(match[2]) * 60,
+      to: DAYS[match[3]] * 1440 + Number(match[4]) * 60,
+      evidence: `${match[1]}요일 ${Number(match[2])}시 ~ ${match[3]}요일 ${Number(match[4])}시`,
+    };
+  };
+
+  Modules.arena.isInsideWindowKst = function (window, date = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Seoul', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(date).reduce((values, part) => {
+      values[part.type] = part.value;
+      return values;
+    }, {});
+    const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday);
+    const minute = day * 1440 + Number(parts.hour) * 60 + Number(parts.minute);
+    // the end minute is inclusive (목요일 22:00 still open)
+    return window.from <= window.to
+      ? minute >= window.from && minute <= window.to
+      : minute >= window.from || minute <= window.to;
+  };
+
   Modules.arena.readPageState = function () {
     if (location.pathname.replace(/\/$/, '') !== '/arena') return { state: 'NOT_ARENA' };
     const text = Core.bodyText().replace(/\s+/g, ' ').trim();
     const closedText = text.match(/(?:아레나는\s*)?(?:(?:토요일과\s*일요일|토요일·일요일|주말)에만|토요일(?:\s*\d{1,2}시)?\s*[~～\-–—]\s*일요일(?:\s*\d{1,2}시)?에만)[^.\n]{0,80}(?:진행|이용|시작|참여|열림|가능)/);
-    if (closedText && !this.isOpenAtKst()) return { state: 'CLOSED', evidence: closedText[0] };
-    if (this.isRegistrationScreen()) return { state: 'REGISTRATION_REQUIRED' };
+    if (closedText && !this.isWeekendOpenAtKst()) return { state: 'CLOSED', evidence: closedText[0] };
+    // 2026-10-23 live (금 13:41, 시즌 9 프리시즌): the page says "토요일 10시부터 목요일 22시까지 연속
+    // 개방" and the 전투 가능 row "토요일 10시 ~ 목요일 22시에 전투 가능"; the start button stays off on
+    // Friday and the macro waited 3 x 90 s into an error. Outside the hours the page itself states,
+    // the arena is closed.
+    const pageWindow = this.readPageOpenWindow(text);
+    if (pageWindow && !this.isInsideWindowKst(pageWindow)) {
+      return { state: 'CLOSED', evidence: `화면 운영 시간(${pageWindow.evidence}) 밖` };
+    }
+    // inside a window the page states, the page decides; otherwise the live weekly hours
+    const closedHours = !pageWindow && !this.isOpenAtKst();
+    const hours = this.OPEN_WINDOW.evidence;
+    // 2026-10-17: 새 시즌 등록 화면은 토요일 10시 전에도 운영 안내 문구 없이 열리지만
+    // 첫 전투 버튼이 비활성이라 등록·복구가 40회 반복되며 Daily를 시간 초과시켰다.
+    // 운영 시간 밖의 등록 단계 화면은 닫힌 화면과 같은 건너뜀으로 끝낸다.
+    if (this.isRegistrationScreen()) {
+      if (closedHours) return { state: 'CLOSED', evidence: `새 시즌 아레나 등록 화면 · 운영 시간(${hours}) 밖` };
+      return { state: 'REGISTRATION_REQUIRED' };
+    }
     const classRegister = Core.allButtons().find((button) =>
       /직업군으로 등록$/.test(button.textContent.replace(/\s+/g, ' ').trim()) &&
       !button.disabled && Core.isElementVisible(button)
     ) || null;
     if (classRegister || /현재 직업군:\s*미등록/.test(text)) {
+      if (closedHours && !classRegister) {
+        return { state: 'CLOSED', evidence: `아레나 직업군 미등록 · 첫 전투 운영 시간(${hours}) 밖` };
+      }
       return { state: 'CLASS_REGISTRATION_REQUIRED', classRegister };
     }
     if (this.isBattleScreen()) return { state: 'READY' };
@@ -9714,6 +9908,8 @@
     maxPasses = 40,
   } = {}) {
     const mod = this;
+    let lastErrorText = null;
+    let sameErrorCount = 0;
     for (let pass = 1; pass <= maxPasses; pass++) {
       if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', pass };
 
@@ -9756,6 +9952,17 @@
           ok: false, code: 'ARENA_VERIFY_FAILED', verification, result: coreResult,
           message: `아레나 완료 확인 실패: 보석 ${gemProgress ? `${gemProgress.current}/${gemProgress.max}` : '읽기 실패'}, ` +
             `에너지 ${energyCost ? energyCost.raw : '읽기 실패'} (오늘 ${count ?? '읽기 실패'}회)`,
+        };
+      }
+      // 같은 오류로 연속 종료되면 진전이 없는 것이므로 40회(약 70분)를 채우지 않는다.
+      const errorText = coreResult?.ok === false ? String(coreResult.message || coreResult.code || '알 수 없음') : null;
+      sameErrorCount = errorText !== null && errorText === lastErrorText ? sameErrorCount + 1 : (errorText !== null ? 1 : 0);
+      lastErrorText = errorText;
+      if (sameErrorCount >= ARENA_REPEATED_ERROR_LIMIT) {
+        return {
+          ok: false, code: 'ARENA_REPEATED_ERROR', verification, result: coreResult,
+          message: `아레나 모듈이 같은 오류로 ${sameErrorCount}회 연속 종료: ${errorText} ` +
+            `(보석 ${gemProgress.current}/${gemProgress.max}, 오늘 ${count ?? '읽기 실패'}회)`,
         };
       }
       if (pass >= maxPasses) {
@@ -10036,7 +10243,7 @@
     // 실전에서 확인됨. null도 0과 동일하게 "부족"으로 취급해 정지한다.
     if (potionRemaining === null || potionRemaining === undefined || potionRemaining <= 0) {
       Core.notifyStopped(
-        moduleId,
+        'rejob',
         `농축 경험의 물약 5배 효과가 소진된 것으로 보입니다(잔여: ${potionRemaining ?? '확인 안됨(문구 없음)'}). ` +
           '자동 사용은 비활성화되어 있으니 직접 사용 후 다시 시작해주세요.'
       );
@@ -10711,8 +10918,12 @@
   }
 
   // -------------------------- 모듈 2: 자동사냥 --------------------------
+  // 2026-10-14 돈땃쥐미 16:38: 층 버튼 컨테이너에는 전투 UI 버튼("전체 턴 보기")도 들어 있어
+  // 레어맵으로 오인·클릭됐다. 실제 레어맵 버튼은 지역 이름("어둠의 설원")이라 문구로 긍정 판별할 수
+  // 없으므로, 알려진 UI 버튼 문구를 제외한다.
   const AUTOHUNT_RARE_BUTTON_EXCLUDE_TEXTS = Object.freeze([
     '전투', '마을', '설정', '취소', '사용하기', '닫기', '로그아웃', '알림',
+    '턴 보기', '전체 턴', '기록', '확인', '돌아가기', '뒤로', '새로고침',
   ]);
 
   Modules.autohunt = {
@@ -10732,6 +10943,10 @@
       // ⚠ 유료 "x50" 일괄 사냥 기능이 없는 캐릭터용: 한 번에 한 전투만 진행하고,
       // 각 전투 후 매번 지도 아이템(레어맵)을 확인/사용해 레어맵이 있으면 바로 들어간다.
       singleBattleMode: false,
+      // 2026-10-14 돈땃쥐미: 1전투 모드는 행동력 2,000을 1회씩 쓰느라 1,193사이클/74분을
+      // 돌아 Daily 75분 한도에 걸려 뒤 단계가 통째로 빠졌다. 1전투 모드는 이 시간 예산(분)
+      // 안에서만 돌고, 남은 행동력은 다음 실행으로 넘긴다.
+      singleBattleMaxMinutes: 25,
     },
   };
 
@@ -10778,17 +10993,34 @@
     shouldCancel = Core.defaultShouldCancel
   ) {
     // ⚠ 1전투 모드에서는 x50 버튼이 아니라 단일 전투 버튼을 기준으로 확인한다.
-    const findBtn = () =>
-      this.config.singleBattleMode
+    // 2026-10-14 (사용자): 컴포트 팩이 없는 캐릭터는 x50 연속 전투 버튼 자체가 없다
+    // (돈땃쥐미 10/13~14 "사냥터 이동에 반복 실패"의 실제 원인). 1전투 버튼만 보이면
+    // 1전투 모드로 자동 전환해 1전투 반복 + 매 전투 후 레어맵으로 돈다.
+    const adoptSingleBattleIfOnlyChoice = () => {
+      if (this.config.singleBattleMode) return;
+      if (this.findHuntX50Button(groundSuffix)) return;
+      if (!this.findSingleBattleButton(groundSuffix)) return;
+      this.config.singleBattleMode = true;
+      this.autoSingleBattleMode = true;
+      Core.log('autohunt', '연속 전투(x50) 버튼이 없어 1전투 모드로 자동 전환합니다 (컴포트 팩 없음)');
+    };
+    const findBtn = () => {
+      adoptSingleBattleIfOnlyChoice();
+      return this.config.singleBattleMode
         ? this.findSingleBattleButton(groundSuffix)
         : this.findHuntX50Button(groundSuffix);
+    };
+    const reportMissing = () => {
+      Core.log('autohunt', `사냥터 버튼 못 찾음: 화면 버튼 = ${this.describeGroundButtons(groundSuffix)}`);
+      return false;
+    };
     if (findBtn()) {
       if (groundSuffix === '광산' && floor) {
         const floorSelected = await this.selectFloor(floor, shouldCancel);
         if (!floorSelected) return false;
       }
       if (groundSuffix === '성벽' && !(await this.selectWallSection(this.config.wallSection, shouldCancel))) return false;
-      return !!findBtn();
+      return !!findBtn() || reportMissing();
     }
     try {
       await Core.clickNavMenuSuffix('전투', groundSuffix, shouldCancel, {
@@ -10806,12 +11038,13 @@
       if (!floorSelected) return false;
     }
     if (groundSuffix === '성벽' && !(await this.selectWallSection(this.config.wallSection, shouldCancel))) return false;
-    return !!(await Core.waitFor(
+    const found = await Core.waitFor(
       () => findBtn(),
       8000,
       300,
       shouldCancel
-    ));
+    );
+    return !!found || reportMissing();
   };
 
   Modules.autohunt.selectWallSection = async function (
@@ -10892,9 +11125,28 @@
   // ⚠ x50 유료 기능이 없는 캐릭터는 사냥터 버튼에 "50" 접미사 없이 사냥터
   // 이름만 뜬다(예: "숲"). 그 버튼 하나만 누르면 매번 단 한 번의 전투만 진행된다.
   Modules.autohunt.findSingleBattleButton = function (groundSuffix = this.config.groundSuffix) {
-    const target = groundSuffix === '성벽' ? `성벽 ${this.config.wallSection}` : groundSuffix;
     if (groundSuffix === '성벽' && !['하층', '중층', '상층'].includes(this.config.wallSection)) return null;
+    // 2026-10-14 돈땃쥐미 14:04 재현: 광산의 1전투 버튼은 x50 버튼과 같이 층이 붙은
+    // "광산 N층" 문구다("광산"만 찾으면 못 찾아 "사냥터 이동 실패"). 층 설정이 있으면
+    // 그 층, 없으면 층이 붙은/안 붙은 광산 버튼 하나만 허용(둘 이상이면 모호 → null).
+    if (groundSuffix === '광산') {
+      const floor = this.config.floor;
+      const pattern = floor
+        ? new RegExp(`^광산\\s*${floor}층$`)
+        : /^광산(?:\s*[1-5]층)?$/;
+      const candidates = Core.allButtons().filter((button) => pattern.test(button.textContent.trim()));
+      return candidates.length === 1 ? candidates[0] : null;
+    }
+    const target = groundSuffix === '성벽' ? `성벽 ${this.config.wallSection}` : groundSuffix;
     return Core.allButtons().find((button) => button.textContent.trim() === target) || null;
+  };
+
+  // 실패 진단: 사냥터 버튼을 못 찾았을 때 화면의 버튼 문구를 남겨 다음 수정의 근거로 쓴다.
+  Modules.autohunt.describeGroundButtons = function (groundSuffix = this.config.groundSuffix) {
+    const texts = Core.allButtons()
+      .map((button) => String(button.textContent || '').trim())
+      .filter((text) => text && text.length <= 20 && (text.includes(groundSuffix) || /[×xX]\s*50/.test(text)));
+    return [...new Set(texts)].slice(0, 12).join(' | ') || '없음';
   };
 
   Modules.autohunt.clickSingleBattle = async function () {
@@ -10920,6 +11172,16 @@
   //
   // 레어맵 기능의 광산 container/button resolver는 "광산"으로 고정되어
   // 있어 다른 사냥터에는 쓸 수 없어서, 현재 사냥터 이름을 기준으로 일반화한다.
+  // 2026-10-14 돈땃쥐미: 광산의 사냥터 버튼 문구는 층이 붙은 "광산 N층"(x50은 "광산 N층 × 50").
+  // "광산"만 사냥터 버튼으로 보면 컨테이너를 못 찾아 1전투 모드에서 레어맵 진입이 0회였다.
+  Modules.autohunt.isGroundButtonText = function (text, groundSuffix) {
+    const t = String(text || '').trim();
+    if (t === groundSuffix) return true;
+    if (groundSuffix === '광산') return /^광산\s*[1-5]층$/.test(t);
+    if (groundSuffix === '성벽') return /^성벽\s*(하층|중층|상층)$/.test(t);
+    return false;
+  };
+
   Modules.autohunt.findGroundContainer = function (groundSuffix) {
     const anchor = document.querySelector('[data-tour="battle-start-button"]');
     if (!anchor) return null;
@@ -10929,7 +11191,7 @@
       el = el.parentElement;
       if (!el) return base;
       const groundButtons = Array.from(el.querySelectorAll('button.MuiButton-fullWidth')).filter(
-        (b) => b.textContent.trim() === groundSuffix
+        (b) => this.isGroundButtonText(b.textContent, groundSuffix)
       );
       if (groundButtons.length >= 1) {
         base = el;
@@ -10944,7 +11206,8 @@
     return buttons.find((b) => {
       const t = b.textContent.trim();
       if (!t) return false;
-      if (t === groundSuffix) return false;
+      if (this.isGroundButtonText(t, groundSuffix)) return false;
+      if (/[×xX]\s*50$/.test(t)) return false;
       if (AUTOHUNT_RARE_BUTTON_EXCLUDE_TEXTS.some((excluded) => t.includes(excluded))) return false;
       if (/^\d+\s*층$/.test(t)) return false;
       return true;
@@ -11022,6 +11285,20 @@
       if (value !== null) return value;
     }
     return null;
+  };
+
+  // 2026-10-19 사용자 요청: Operator가 캐릭터별 예상 행동력을 계산하도록 매크로 시작·종료
+  // 때 현재 행동력을 정해진 형식으로 남긴다(기록 전용, 실패해도 실행에 영향 없음).
+  // 형식: "⚡ 행동력 기록(시작|종료): 값/최대"
+  Modules.autohunt.recordEnergy = function (moduleId, phase, value = undefined) {
+    try {
+      const energy = value === undefined ? this.readEnergy() : value;
+      if (energy === null || energy === undefined || !this.lastEnergyMax) return null;
+      Core.log(moduleId, `⚡ 행동력 기록(${phase}): ${energy}/${this.lastEnergyMax}`);
+      return energy;
+    } catch (_) {
+      return null;
+    }
   };
 
   // 행동력을 못 읽었을 때 화면에 실제로 보이는 행동력 영역을 남긴다(기록 전용).
@@ -11723,6 +12000,7 @@
     // 있었다. 행동력 표시는 어느 화면에서나 바로 읽을 수 있으므로, 프리셋/
     // 속성을 건드리기 전에 먼저 확인한다.
     const startEnergy = mod.readEnergy();
+    if (startEnergy !== null) mod.recordEnergy?.('autohunt', '시작', startEnergy);
     if (startEnergy !== null && startEnergy < mod.config.minEnergy) {
       Core.notifyCompleted(
         'autohunt',
@@ -11747,8 +12025,17 @@
     );
 
     let consecutiveFailures = 0;
+    const loopStartedAt = Date.now();
+    const singleBudgetMs = Math.max(1, Number(mod.config.singleBattleMaxMinutes) || 25) * 60 * 1000;
 
     while (mod.running && !mod.stopRequested) {
+      if (mod.config.singleBattleMode && Date.now() - loopStartedAt >= singleBudgetMs) {
+        Core.notifyCompleted(
+          'autohunt',
+          `1전투 모드 시간 예산(${Math.round(singleBudgetMs / 60000)}분)에 도달해 사냥을 마칩니다 (${mod.cycleCount}사이클) — 남은 행동력은 다음 실행에서 이어갑니다.`
+        );
+        break;
+      }
       mod.cycleCount++;
       Core.log('autohunt', `--- ${mod.cycleCount}번째 사이클 ---`);
       Core.updateModuleButtons();
@@ -11807,6 +12094,7 @@
 
       const energy = mod.readEnergy();
       if (energy !== null && energy < mod.config.minEnergy) {
+        mod.recordEnergy?.('autohunt', '종료', energy);
         Core.notifyCompleted('autohunt', `설정한 행동력 제한 도달(${energy}/${mod.lastEnergyMax}, 기준 ${mod.config.minEnergy})`);
         break;
       }
@@ -12684,7 +12972,10 @@
     }
     const enterBtn = [...card.querySelectorAll('button')].find((b) => b.textContent.trim() === '입장');
     if (!enterBtn || enterBtn.disabled) {
-      Core.log('dungeon', `"${dungeonDef.label}" 입장 버튼이 없거나 비활성 상태`);
+      // 2026-10-08 호비: 입장권(기록 2·1개)이 있는데 두 카드의 입장 버튼이 비활성이었다.
+      // 원인(행동력·쿨다운·렌더링)을 가릴 수 있게 카드 문구를 함께 남긴다(기록 전용).
+      const cardText = (card.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+      Core.log('dungeon', `"${dungeonDef.label}" 입장 버튼이 ${enterBtn ? '비활성' : '없음'} 상태 / 카드: ${cardText}`);
       return false;
     }
 
@@ -16486,9 +16777,11 @@
     }, 8000, 250, () => !mod.running || mod.stopRequested);
   };
 
-  Modules.guildboss.runAttackLoop = async function (bossId, expectedHeadName, targetElement) {
+  Modules.guildboss.runAttackLoop = async function (bossId, expectedHeadName, targetElement, attackLimit = null) {
     const mod = this;
-    const maxAttacks = mod.BOSS_REGISTRY[bossId].maxAttacks;
+    const maxAttacks = Number.isInteger(attackLimit) && attackLimit > 0
+      ? attackLimit
+      : mod.BOSS_REGISTRY[bossId].maxAttacks;
     for (let i = 0; i < maxAttacks; i++) {
       if (!mod.running || mod.stopRequested) return { stopped: true };
 
@@ -16595,6 +16888,386 @@
     return { stopped: false };
   };
 
+  // ---- 2026-10-20 히드라 봉인 모드 (사용자 절차, knowledge guild-boss.md#hydra-operating-procedure) ----
+  // 룰루비데: 소환(심연의 히드라·벨라 기본값) → 공용 프리셋 '히드라 봉인' → 불 속성 확인 →
+  // 화염·빙결·전격·대지·바람 순서로 머리마다 1턴 → 패배가 늘었으면 같은 머리 1회 재공격 →
+  // 남은 공격 횟수는 화염(불) 머리에 모두 쓴다.
+  // ---- 2026-10-21 히드라 재설계 (knowledge/domains/combat/guild-boss-auto-redesign.md) ----
+  // 화면이 유일한 근거다. 공격·돌·프리셋 전에 길드 보스 목록 화면을 머리 카드 단위로 읽고,
+  // 못 읽은 값은 null로 둔다(0이나 기본값으로 채우지 않는다).
+  Modules.guildboss.SEAL_MODE_KEY = 'lrm-guildboss-mode';
+  Modules.guildboss.HYDRA_PLAN_KEY = 'lrm-hydra-plan';
+  Modules.guildboss.SEAL_SCREEN_ORDER = ['화염의 머리', '빙결의 머리', '전격의 머리', '대지의 머리', '바람의 머리'];
+  Modules.guildboss.HEAD_ELEMENT_OF = {
+    '화염의 머리': '불', '빙결의 머리': '물', '전격의 머리': '번개', '대지의 머리': '별', '바람의 머리': '바람',
+  };
+  Modules.guildboss.SEAL_TARGET = { seals: 3 };
+  Modules.guildboss.FIRE_LEFTOVER_ATTACKS = 3;   // 절차(USER): 봉인을 다 마치고 남으면 화염 머리만 3번
+
+  // 머리 카드: 머리 이름 글자에서 위로 올라가며 다른 머리 이름이 들어가기 직전까지의 상자.
+  // 속성은 글자가 속성명과 정확히 같은 요소만 인정한다("불굴" 같은 어빌 칩에 섞인 "불"은 무시).
+  // 봉인 칩: 카드 안에서 머리 이름과 "HP" 사이에 있는, 글자를 가진 자식이 없는 요소 하나 = 칩 하나
+  // (2026-10-20 실화면: 자물쇠는 문자가 아니라 아이콘 + 어빌 이름 칩).
+  Modules.guildboss.readHydraCards = function (bossId) {
+    const headNames = Modules.guildboss.BOSS_REGISTRY[bossId].headNames;
+    const all = Core.gameElements('*').filter((el) => Core.isElementVisible(el));
+    const text = (el) => (el.textContent || '').trim();
+    const inside = (el, root) => {
+      for (let node = el; node; node = node.parentElement) if (node === root) return true;
+      return false;
+    };
+    const number = (value) => parseInt(String(value).replace(/,/g, ''), 10);
+    const heads = {};
+    for (const headName of headNames) {
+      const labelIndex = all.findIndex((el) => el.children.length === 0 && text(el) === headName);
+      if (labelIndex < 0) continue;
+      let card = all[labelIndex];
+      while (card.parentElement && !headNames.some((other) => other !== headName && text(card.parentElement).includes(other))) {
+        card = card.parentElement;
+      }
+      const cardText = text(card);
+      const hp = cardText.match(/HP\s*:?\s*([\d,]+)\s*\/\s*([\d,]+)/);
+      const mp = cardText.match(/MP\s*:?\s*([\d,]+)\s*\/\s*([\d,]+)/);
+      if (!hp) {
+        heads[headName] = { readable: false, raw: cardText.slice(0, 160) };   // 소환 폼의 머리 이름 등
+        continue;
+      }
+      const tokens = new Set();
+      let hpIndex = -1;
+      for (let i = labelIndex + 1; i < all.length; i++) {
+        const el = all[i];
+        if (!inside(el, card)) continue;
+        if (el.children.length === 0 && text(el) === 'HP' && hpIndex < 0) hpIndex = i;
+        if (el.children.length === 0 && Core.ELEMENT_OPTIONS.includes(text(el))) tokens.add(text(el));
+      }
+      let sealChips = null;
+      if (hpIndex > labelIndex) {
+        sealChips = 0;
+        for (let i = labelIndex + 1; i < hpIndex; i++) {
+          const el = all[i];
+          const own = text(el).replace(/🔒/g, '').trim();
+          if (!own || !inside(el, card) || Core.ELEMENT_OPTIONS.includes(own) || own === headName) continue;
+          if ([...el.children].some((child) => text(child))) continue;
+          // 2차 검수: 자물쇠 아이콘(글자 없는 자식 요소)이 붙은 칩만 봉인으로 센다. 아이콘을 못 찾으면
+          // 봉인으로 치지 않는다(멈추는 쪽으로 실패).
+          if (![...el.children].some((child) => !text(child))) continue;
+          sealChips += 1;
+        }
+        // 실화면 2026-10-22 18:24 기록 원문 "화염의 머리불🔒 맥스 샤프니스🔒 상처 지지기🔒 방한HP…":
+        // 자물쇠는 카드 글자 속 🔒 문자였고 위 아이콘 판독은 0으로 셌다. 요소 구조와 무관하게
+        // HP 앞 카드 글자의 🔒 개수도 센다.
+        const locks = (cardText.slice(0, hp.index).match(/🔒/gu) || []).length;
+        sealChips = Math.max(sealChips, locks);
+      }
+      const current = number(hp[1]);
+      heads[headName] = {
+        readable: true,
+        element: tokens.size === 1 ? [...tokens][0] : null,
+        hp: current, hpMax: number(hp[2]),
+        mp: mp ? number(mp[1]) : null, mpMax: mp ? number(mp[2]) : null,
+        sealChips,
+        defeated: cardText.includes('처치됨') || current <= 0,
+        raw: cardText.slice(0, 160),
+      };
+      // 판독이 틀렸을 때 추측 없이 구조를 보기 위한 실제 카드 HTML(class·style 제외). 관측 보고와 별도 줄.
+      Modules.guildboss.lastCardHtml = Modules.guildboss.lastCardHtml || {};
+      Modules.guildboss.lastCardHtml[headName] =
+        String(card.outerHTML || '').replace(/\s(class|style|data-[\w-]+)="[^"]*"/g, '').slice(0, 600);
+    }
+    return heads;
+  };
+
+  // 같은 결과가 두 번 연속 나와야 믿는다(렌더링 중간값 방지).
+  Modules.guildboss.observeHydra = async function (bossId) {
+    const mod = this;
+    const summonButton = () => {
+      const button = Core.findButtonByText('보스 소환');
+      return button && !button.disabled && Core.isElementVisible(button) ? button : null;
+    };
+    let previous = null;
+    let heads = null;
+    let stable = false;
+    const until = Date.now() + 9000;
+    while (Date.now() < until) {
+      heads = mod.readHydraCards(bossId);
+      const key = JSON.stringify(heads);
+      if (key === previous && Object.keys(heads).length > 0) { stable = true; break; }
+      previous = key;
+      await Core.humanDelay(500, 700);
+    }
+    const names = mod.BOSS_REGISTRY[bossId].headNames;
+    const formVisible = Boolean(summonButton());
+    const cardsReadable = names.every((name) => heads && heads[name] && heads[name].readable);
+    const summon = formVisible ? 'FORM' : (cardsReadable ? 'HEADS' : 'UNKNOWN');
+    const body = Core.bodyText();
+    const remaining = body.match(/(?:(\d+)\s*시간\s*)?(\d+)\s*분\s*(\d+)\s*초\s*남음/);
+    const count = summon === 'HEADS' ? mod.getAttackCount() : null;   // 소환 폼의 공격 횟수는 지난 소환 기록
+    const result = {
+      summon, stable, heads: heads || {},
+      formBoss: formVisible ? { hydra: body.includes('심연의 히드라'), bella: body.includes('벨라') } : null,
+      myAttacks: count ? { used: count.current, max: count.max } : null,
+      remainingSeconds: remaining
+        ? parseInt(remaining[1] || '0', 10) * 3600 + parseInt(remaining[2], 10) * 60 + parseInt(remaining[3], 10) : null,
+    };
+    mod.report('히드라 관측', result);
+    const logged = mod.loggedCardHtml = mod.loggedCardHtml || {};
+    for (const name of names) {
+      const html = (mod.lastCardHtml || {})[name];
+      if (html && logged[name] !== html) {
+        logged[name] = html;
+        Core.log('guildboss', `🧩 카드 구조 ${name}: ${html}`);
+      }
+    }
+    return result;
+  };
+
+  Modules.guildboss.isHeadSealed = function (info) {
+    return Boolean(info && info.readable && info.sealChips !== null && info.mp !== null
+      && info.sealChips >= Modules.guildboss.SEAL_TARGET.seals && info.mp === 0);
+  };
+
+  // 결과 박스 "보스: 방↓N"(마방↓ 제외). 실화면 대조 전이라 보고에만 쓰고 판단에는 쓰지 않는다.
+  Modules.guildboss.readDefenseDown = function () {
+    const text = Core.bodyText();
+    const values = [];
+    for (const m of text.matchAll(/(?<!마)방\s*↓\s*([\d,]+)/g)) values.push(parseInt(m[1].replace(/,/g, ''), 10));
+    return values.length ? Math.max(...values) : null;
+  };
+
+  Modules.guildboss.countDefeats = function () {
+    return (Core.bodyText().match(/패배/g) || []).length;
+  };
+
+  // Operator가 읽는 구조화 보고 한 줄: "🧾 <종류> {json}"
+  Modules.guildboss.report = function (kind, data) {
+    try {
+      Core.log('guildboss', `🧾 ${kind} ${JSON.stringify(data)}`);
+    } catch (_) {
+      Core.log('guildboss', `🧾 ${kind} {"reason":"REPORT_SERIALIZE_FAILED"}`);
+    }
+  };
+
+  Modules.guildboss.defeatedHeads = function (observation) {
+    return Object.entries(observation?.heads || {})
+      .filter(([, info]) => info && info.readable && info.defeated).map(([name]) => name);
+  };
+
+  Modules.guildboss.ensureSummoned = async function (bossId) {
+    const mod = this;
+    // 2026-10-20 실전: 소환 폼에도 머리 이름 다섯 개가 보여 이름만으로 "이미 소환됨"이라 판단했다.
+    // 소환 버튼이 보이면 소환 전이고, 속성(또는 처치됨)까지 읽히는 머리 카드 다섯 개여야 소환된 상태다.
+    const summonButton = () => {
+      const button = Core.findButtonByText('보스 소환');
+      return button && !button.disabled && Core.isElementVisible(button) ? button : null;
+    };
+    const headsVisible = () => (mod.readHeadElementSnapshot(bossId)
+      .filter((entry) => entry.element || entry.defeated).length >= 5 ? true : null);
+    const seen = await Core.waitFor(() => (summonButton() ? 'FORM' : headsVisible() ? 'HEADS' : null), 10000, 300);
+    if (seen === 'HEADS') {
+      Core.log('guildboss', '히드라 이미 소환됨 · 머리 다섯 개 속성 확인');
+      return 'ALREADY_SUMMONED';
+    }
+    if (seen !== 'FORM') {
+      throw new Error('히드라 머리도 소환 폼("보스 소환")도 보이지 않습니다. 소환 상태를 확인할 수 없어 중단합니다.');
+    }
+    Core.log('guildboss', '히드라 소환 폼 확인 → "보스 소환" 클릭');
+    if (!(await Core.safeClick(summonButton, { beforeMin: 600, beforeMax: 1000, afterMin: 700, afterMax: 1100 }))) {
+      throw new Error('"보스 소환" 클릭에 실패했습니다.');
+    }
+    const confirmButton = () => {
+      for (const dialog of Core.getOpenGameDialogs()) {
+        const button = [...dialog.querySelectorAll('button')].find(
+          (b) => b.textContent.trim() === '소환' && !b.disabled && Core.isElementVisible(b)
+        );
+        if (button) return button;
+      }
+      return null;
+    };
+    if (await Core.waitFor(confirmButton, 6000, 250)) {
+      if (!(await Core.safeClick(confirmButton, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400 }))) {
+        throw new Error('소환 확인창의 "소환" 클릭에 실패했습니다.');
+      }
+    }
+    if (!(await Core.waitFor(headsVisible, 20000, 400))) {
+      throw new Error('소환 뒤 히드라 머리 다섯 개를 확인하지 못했습니다.');
+    }
+    Core.log('guildboss', '히드라 소환 완료 · 머리 다섯 개 확인');
+    return 'SUMMONED';
+  };
+
+  // 화면 이동·머리 선택까지만 재시도한다. 공격 클릭은 래퍼 밖에서 정확히 한 번(10/20 검수: 클릭 뒤
+  // 오류를 재시도하면 같은 공격이 두 번 나갈 수 있다). 클릭 뒤 결과가 불명확하면 예외로 끝낸다.
+  Modules.guildboss.attackHeadOnce = async function (bossId, element, expectedHead = null) {
+    const mod = this;
+    const headLabel = await mod.retrying(`"${element}" 머리 진입`, async () => {
+      await mod.goToGuildBossScreen();
+      const head = await mod.enterHeadBattle(bossId, element);
+      if (expectedHead && head !== expectedHead) {
+        // 2차 검수: the seal plan names the head; entering another head must never attack it
+        throw new Error(`공격 대상 검증 실패: 기대 "${expectedHead}" / 진입 "${head}". 공격하지 않습니다.`);
+      }
+      await Core.waitFor(() => (mod.getBattleTargetHeadName(bossId) ? true : null), 8000, 250);
+      mod.assertBattleTarget(bossId, head, element);
+      return head;
+    });
+    const before = mod.countDefeats();
+    const result = await mod.runAttackLoop(bossId, headLabel, element, 1);
+    await Core.humanDelay(1500, 2200);
+    return { headLabel, lost: mod.countDefeats() > before, result, count: mod.getAttackCount() };
+  };
+
+  Modules.guildboss.retrying = async function (label, fn, attempts = 3) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (!this.running || this.stopRequested) throw new Error('사용자가 정지했습니다.');
+      try {
+        return await fn();
+      } catch (e) {
+        lastError = e;
+        Core.log('guildboss', `⚠ ${label} 실패(${attempt}/${attempts}): ${e.message}`);
+        await Core.humanDelay(2500, 4000);
+      }
+    }
+    throw lastError;
+  };
+
+  Modules.guildboss.SEAL_HEAD_BY_ELEMENT = {
+    '불': '화염의 머리', '물': '빙결의 머리', '번개': '전격의 머리', '별': '대지의 머리', '바람': '바람의 머리',
+  };
+
+  // 봉인(룰루비데 primary / 이라 support). 사람이 하는 순서: 먼저 다섯 머리를 보고 → 봉인 안 된
+  // 머리만 → 한 번 치고 다시 보고 → 안 됐으면 같은 머리. 판독이 안 되면 치지 않고 끝낸다.
+  Modules.guildboss.runSealRoutine = async function (bossId, { support = false } = {}) {
+    const mod = this;
+    const stopped = () => !mod.running || mod.stopRequested;
+    const finish = (reason, observation, extra = {}) => {
+      const heads = observation?.heads || {};
+      const alive = mod.SEAL_SCREEN_ORDER.filter((name) => heads[name] && !heads[name].defeated);
+      const unreadable = alive.filter((name) => !heads[name].readable || heads[name].sealChips === null || heads[name].mp === null);
+      const sealed = alive.filter((name) => mod.isHeadSealed(heads[name]));
+      const unsealed = alive.filter((name) => !sealed.includes(name) && !unreadable.includes(name));
+      mod.report('봉인 결과', {
+        kind: 'seal', reason, sealed, unsealed, unreadable,
+        defeatedHeads: mod.defeatedHeads(observation),
+        usedAfter: observation?.myAttacks?.used ?? null, defenseDown: mod.readDefenseDown(), ...extra,
+      });
+      return { reason, sealed, unsealed, unreadable };
+    };
+    Core.log('guildboss', `히드라 봉인 시작(${support ? '이어받기' : '소환·봉인'}): 먼저 다섯 머리 상태 확인`);
+    await mod.retrying('길드 보스 화면 진입', () => mod.goToGuildBossScreen());
+    let obs = await mod.observeHydra(bossId);
+    if (obs.summon === 'FORM') {
+      if (support) return finish('PRECHECK_NOT_SUMMONED', obs);
+      if (!obs.formBoss?.hydra || !obs.formBoss?.bella) return finish('PRECHECK_SUMMON_FORM', obs, { formBoss: obs.formBoss });
+      await mod.ensureSummoned(bossId);   // 소환 클릭은 여기서 한 번(재시도 래퍼 밖)
+      await mod.retrying('길드 보스 화면 진입', () => mod.goToGuildBossScreen());
+      obs = await mod.observeHydra(bossId);
+    }
+    if (obs.summon !== 'HEADS') return finish('PRECHECK_NOT_SUMMONED', obs);
+    if (!obs.stable) return finish('UNREADABLE', obs);
+    const usedBefore = obs.myAttacks?.used ?? null;
+    let state = null;
+    const classify = (observation) => {
+      const heads = observation.heads;
+      const alive = mod.SEAL_SCREEN_ORDER.filter((name) => heads[name] && !heads[name].defeated);
+      const unreadable = alive.filter((name) => !heads[name].readable || heads[name].sealChips === null || heads[name].mp === null);
+      return { unreadable, unsealed: alive.filter((name) => !unreadable.includes(name) && !mod.isHeadSealed(heads[name])) };
+    };
+    state = classify(obs);
+    if (state.unreadable.length) return finish('UNREADABLE', obs, { usedBefore });
+    if (!state.unsealed.length && support) return finish('COMPLETE', obs, { usedBefore });
+    if (stopped()) return finish('USER_STOP', obs, { usedBefore });
+    if (!state.unsealed.length) return finish('COMPLETE', obs, { usedBefore });
+    if (!obs.myAttacks || obs.myAttacks.used >= obs.myAttacks.max) return finish(obs.myAttacks ? 'INCOMPLETE' : 'UNREADABLE', obs, { usedBefore });
+    await mod.retrying('"히드라 봉인" 프리셋', () => mod.applyBossPreset('히드라 봉인'));
+    if (support) {
+      // 2026-10-24 사용자: 이라 이어받기는 속성 확인·돌 없이 장비(프리셋)만 바꾸고 친다.
+      Core.log('guildboss', '봉인 이어받기: 장비만 교체, 속성 확인·돌 사용 없음');
+    } else {
+      Core.log('guildboss', '봉인 전 속성 확인: 불이 아니면 불의 돌 사용');
+      await mod.retrying('불 속성 맞추기', () => Core.ensureCharacterElement('불', 'guildboss'));
+    }
+    const attempted = new Set();
+    const attackOnce = async (headName) => {
+      const element = mod.HEAD_ELEMENT_OF[headName];
+      try {
+        const outcome = await mod.attackHeadOnce(bossId, element, headName);
+        Core.log('guildboss', `봉인 공격: "${outcome.headLabel}" ${outcome.lost ? '패배' : '승리'}` +
+          (outcome.count ? ` · 공격 횟수 ${outcome.count.current}/${outcome.count.max}` : ''));
+        if (outcome.result?.headDefeated) return 'OK';   // someone killed it: the re-read decides
+        return outcome.result?.stopped ? 'STOPPED' : 'OK';
+      } catch (e) {
+        Core.log('guildboss', `⚠ 봉인 공격 중단: ${e.message}`);
+        if (stopped()) return 'STOPPED';
+        return /GUILD_BOSS_ATTACK_RESULT_UNKNOWN/.test(e.message) ? 'RESULT_UNKNOWN' : 'TARGET_LOST';
+      }
+    };
+    while (state.unsealed.length) {
+      if (stopped()) return finish('USER_STOP', obs, { usedBefore });
+      const used = obs.myAttacks?.used;
+      const max = obs.myAttacks?.max;
+      if (!Number.isInteger(used) || !Number.isInteger(max)) return finish('UNREADABLE', obs, { usedBefore });
+      if (used >= max) return finish('INCOMPLETE', obs, { usedBefore });
+      // 남은 횟수가 남은 미봉인 머리 수보다 적으면, 이미 한 번 친 머리보다 아직 안 친 머리부터.
+      const fresh = state.unsealed.filter((name) => !attempted.has(name));
+      const head = (max - used) <= fresh.length && fresh.length ? fresh[0] : state.unsealed[0];
+      attempted.add(head);
+      const result = await attackOnce(head);
+      if (result !== 'OK') {
+        await mod.retrying('길드 보스 화면 진입', () => mod.goToGuildBossScreen()).catch(() => {});
+        const after = await mod.observeHydra(bossId).catch(() => obs);
+        return finish(result === 'STOPPED' ? 'USER_STOP' : result, after, { usedBefore });
+      }
+      await mod.retrying('길드 보스 화면 진입', () => mod.goToGuildBossScreen());
+      obs = await mod.observeHydra(bossId);
+      if (!obs.stable || obs.summon !== 'HEADS') return finish('UNREADABLE', obs, { usedBefore });
+      state = classify(obs);
+      const info = obs.heads[head];
+      if (info?.readable) {
+        Core.log('guildboss', `"${head}" 상태: 봉인 칩 ${info.sealChips ?? '?'}/3 · MP ${info.mp ?? '?'}/${info.mpMax ?? '?'}`);
+      }
+      if (state.unreadable.length) return finish('UNREADABLE', obs, { usedBefore });
+    }
+    // 다섯 머리 봉인을 화면에서 확인. 횟수가 남으면 화염 머리만 3번(절차).
+    if (!support) {
+      for (let i = 0; i < mod.FIRE_LEFTOVER_ATTACKS; i++) {
+        if (stopped()) return finish('USER_STOP', obs, { usedBefore });
+        const used = obs.myAttacks?.used;
+        const max = obs.myAttacks?.max;
+        if (!Number.isInteger(used) || !Number.isInteger(max) || used >= max) break;
+        if (obs.heads['화염의 머리']?.defeated) break;
+        const result = await attackOnce('화염의 머리');
+        await mod.retrying('길드 보스 화면 진입', () => mod.goToGuildBossScreen());
+        obs = await mod.observeHydra(bossId);
+        if (result !== 'OK') return finish(result === 'STOPPED' ? 'USER_STOP' : result, obs, { usedBefore });
+      }
+    }
+    return finish('COMPLETE', obs, { usedBefore });
+  };
+
+  // 머리 공격 전 확인(Operator가 보낸 계획과 화면이 맞는지). 하나라도 틀리면 돌·프리셋·공격 없이 끝낸다.
+  Modules.guildboss.precheckHydraAttack = function (plan, obs) {
+    const mod = this;
+    const heads = obs.heads || {};
+    if (obs.summon !== 'HEADS') return 'PRECHECK_NOT_SUMMONED';
+    if (!obs.stable) return 'PRECHECK_UNREADABLE';
+    const alive = mod.SEAL_SCREEN_ORDER.filter((name) => heads[name] && !heads[name].defeated);
+    if (alive.some((name) => !heads[name].readable || heads[name].element === null)) return 'PRECHECK_UNREADABLE';
+    if (plan.requireSealed) {
+      if (alive.some((name) => heads[name].sealChips === null || heads[name].mp === null)) return 'PRECHECK_UNREADABLE';
+      if (alive.some((name) => !mod.isHeadSealed(heads[name]))) return 'PRECHECK_NOT_SEALED';
+    }
+    if ((plan.mustBeDefeated || []).some((name) => !heads[name]?.defeated)) return 'PRECHECK_ORDER';
+    const target = heads[plan.targetHead];
+    if (!target || !target.readable) return 'PRECHECK_UNREADABLE';
+    if (target.defeated) return 'PRECHECK_TARGET_DEFEATED';
+    if (target.element !== plan.headElement) return 'PRECHECK_ELEMENT';
+    if (plan.attackElement === target.element) return 'PRECHECK_ELEMENT';
+    if (!obs.myAttacks) return 'PRECHECK_UNREADABLE';
+    if (obs.myAttacks.used >= obs.myAttacks.max) return 'EXHAUSTED';
+    return null;
+  };
+
   Modules.guildboss.mainLoop = async function () {
     const mod = this;
     const bossId = mod.activeBossId;
@@ -16605,36 +17278,114 @@
     }
     const bossConfig = mod.getBossConfig(bossId);
     Core.log('guildboss', `길드 보스(${bossDef.label}) 매크로 시작`);
+    let sealMode = '';
+    let plan = null;
     try {
-      if (!bossConfig.targetElement) throw new Error('공격할 속성을 먼저 선택해주세요.');
-
-      Core.log('guildboss', `시작 전 원래 속성(${bossConfig.originalElement}) 확인`);
-      await Core.ensureCharacterElement(bossConfig.originalElement, 'guildboss');
-      if (!mod.running || mod.stopRequested) return;
+      sealMode = sessionStorage.getItem(mod.SEAL_MODE_KEY) || '';
+      sessionStorage.removeItem(mod.SEAL_MODE_KEY);
+      plan = JSON.parse(sessionStorage.getItem(mod.HYDRA_PLAN_KEY) || 'null');
+      sessionStorage.removeItem(mod.HYDRA_PLAN_KEY);
+    } catch (_) {}
+    let autoStart = false;
+    try {
+      autoStart = sessionStorage.getItem('lrm-hydra-auto') === '1';
+      sessionStorage.removeItem('lrm-hydra-auto');
+    } catch (_) {}
+    if (autoStart && !plan && sealMode !== 'seal' && sealMode !== 'seal-support') {
+      mod.report('히드라 차례', { kind: 'attack', reason: 'PRECHECK_UNREADABLE', error: 'plan missing' });
+      Core.notifyStopped('guildboss', '자동 진행 계획을 받지 못해 공격하지 않습니다.');
+      return;
+    }
+    if (sealMode === 'observe' && bossId === 'hydra') {
+      try {
+        await mod.retrying('길드 보스 화면 진입', () => mod.goToGuildBossScreen());
+        const obs = await mod.observeHydra(bossId);   // reports '🧾 히드라 관측 {...}' with raw card text
+        Core.notifyCompleted('guildboss', `히드라 화면 관측 끝 · ${obs.summon}${obs.stable ? '' : ' · 불안정'}`);
+      } catch (e) {
+        Core.notifyStopped('guildboss', `히드라 화면 관측 실패: ${e.message}`);
+      }
+      return;
+    }
+    if ((sealMode === 'seal' || sealMode === 'seal-support') && bossId === 'hydra') {
+      try {
+        const result = await mod.runSealRoutine(bossId, { support: sealMode === 'seal-support' });
+        if (result.reason === 'COMPLETE') Core.notifyCompleted('guildboss', '히드라 봉인 완료(화면 확인)');
+        else Core.notifyStopped('guildboss', `히드라 봉인 멈춤 · ${result.reason}`);
+      } catch (e) {
+        mod.report('봉인 결과', { kind: 'seal', reason: 'TARGET_LOST', error: String(e.message || e) });
+        Core.notifyStopped('guildboss', `히드라 봉인 중단: ${e.message}`);
+      }
+      return;
+    }
+    // 자동 진행(계획 있음): 공격 전 화면 확인 → 결과 보고. 수동 시작(계획 없음)은 기존 동작.
+    const turn = { kind: 'attack', head: plan?.targetHead || null, usedBefore: null, usedAfter: null,
+      defeated: null, defeatedHeads: [] };
+    const endTurn = (reason, extra = {}) => {
+      if (plan) {
+        const count = mod.getAttackCount();
+        mod.report('히드라 차례', { ...turn, reason, usedAfter: turn.usedAfter ?? (count ? count.current : null), ...extra });
+      }
+    };
+    try {
+      if (plan && bossId === 'hydra') {
+        await mod.retrying('길드 보스 화면 진입', () => mod.goToGuildBossScreen());
+        const obs = await mod.observeHydra(bossId);
+        turn.usedBefore = obs.myAttacks?.used ?? null;
+        turn.defeatedHeads = mod.defeatedHeads(obs);
+        const refusal = mod.precheckHydraAttack(plan, obs);
+        if (refusal) {
+          turn.usedAfter = turn.usedBefore;
+          endTurn(refusal);
+          Core.notifyStopped('guildboss', `히드라 공격 전 확인에서 멈춤: ${refusal}`);
+          return;
+        }
+      }
+      const headElement = plan ? plan.headElement : bossConfig.targetElement;
+      if (!headElement) throw new Error('공격할 속성을 먼저 선택해주세요.');
+      if (plan && plan.keepElement) {
+        // 보조·남는 캐릭터: 속성을 바꾸지 않는다(절차). 지금 속성이 머리와 같으면 이 머리에선 빠진다.
+        await Core.goToCharacterPage('내 정보', '/status');
+        const mine = await Core.waitFor(() => Core.readCharacterElementOnStatus(), 8000, 250);
+        turn.myElement = mine || null;
+        if (!mine) { endTurn('PRECHECK_UNREADABLE'); Core.notifyStopped('guildboss', '내 속성을 읽지 못해 공격하지 않습니다.'); return; }
+        if (mine === headElement) { endTurn('PRECHECK_SAME_ELEMENT'); Core.notifyStopped('guildboss', `내 속성(${mine})이 머리와 같아 공격하지 않습니다.`); return; }
+        Core.log('guildboss', `보조 · 현재 속성 ${mine} 그대로 공격(돌 사용 안 함)`);
+      } else {
+        const attackElement = plan ? plan.attackElement : bossConfig.originalElement;
+        Core.log('guildboss', `시작 전 원래 속성(${attackElement}) 확인`);
+        await Core.ensureCharacterElement(attackElement, 'guildboss');
+        turn.myElement = attackElement;
+      }
+      if (!mod.running || mod.stopRequested) { endTurn('USER_STOP'); return; }
 
       await mod.applyBossPreset(bossDef.presetName);
-      if (!mod.running || mod.stopRequested) return;
+      if (!mod.running || mod.stopRequested) { endTurn('USER_STOP'); return; }
 
       await mod.goToGuildBossScreen();
-      if (!mod.running || mod.stopRequested) return;
+      if (!mod.running || mod.stopRequested) { endTurn('USER_STOP'); return; }
 
-      const headLabel = await mod.enterHeadBattle(bossId, bossConfig.targetElement);
-      if (!mod.running || mod.stopRequested) return;
+      const headLabel = await mod.enterHeadBattle(bossId, headElement);
+      if (!mod.running || mod.stopRequested) { endTurn('USER_STOP'); return; }
+      if (plan && headLabel !== plan.targetHead) {
+        endTurn('TARGET_LOST', { entered: headLabel });
+        Core.notifyStopped('guildboss', `계획한 머리(${plan.targetHead})가 아닌 "${headLabel}"에 들어가 공격하지 않습니다.`);
+        return;
+      }
 
       // 목록의 머리 텍스트 인식/클릭과 실제 전투 대상은 별개다. 전투
       // 화면에서 실제 대상을 확인한 뒤에만 공격 루프로 진입한다.
-      // 경로만 바뀐 직후엔 "공격 대상" 줄이 아직 없어 "확인 불가"로 멈췄다(2026-10-07
-      // 렌더링 감사). 대상 줄이 읽힐 때까지 기다린 뒤 같은 검증을 한다.
       const battleTargetRendered = await Core.waitFor(
         () => (mod.getBattleTargetHeadName(bossId) ? true : null), 8000, 250
       );
       if (!battleTargetRendered) Core.log('guildboss', '⚠ 전투 화면에서 8초 안에 "공격 대상" 줄이 보이지 않음');
-      if (!mod.running || mod.stopRequested) return;
-      mod.assertBattleTarget(bossId, headLabel, bossConfig.targetElement);
-      Core.log('guildboss', `공격 전 대상 검증 완료: "${headLabel}" (${bossConfig.targetElement} 속성)`);
+      if (!mod.running || mod.stopRequested) { endTurn('USER_STOP'); return; }
+      mod.assertBattleTarget(bossId, headLabel, headElement);
+      Core.log('guildboss', `공격 전 대상 검증 완료: "${headLabel}" (${headElement} 속성)`);
 
-      const loopResult = await mod.runAttackLoop(bossId, headLabel, bossConfig.targetElement);
+      const loopResult = await mod.runAttackLoop(bossId, headLabel, headElement);
       if (loopResult.headDefeated) {
+        turn.defeated = true;
+        endTurn('HEAD_DEFEATED');
         const msg = loopResult.headDefeatedAfterSubmission
           ? `선택 머리 "${headLabel}"(${bossConfig.targetElement} 속성)의 처치 상태를 공격 결과로 확인했습니다. 추가 공격 없이 개인 공격 세션을 종료합니다.`
           : `선택 머리 "${headLabel}"(${bossConfig.targetElement} 속성)의 처치 상태를 확인했습니다. 공격하지 않고 개인 공격 세션을 종료합니다.`;
@@ -16642,11 +17393,17 @@
         return;
       }
       if (!loopResult.stopped) {
+        endTurn('EXHAUSTED');
         Core.notifyCompleted('guildboss', `길드 보스(${bossDef.label}) 개인 공격 세션을 완료했습니다.`);
         return;
       }
+      endTurn('USER_STOP');
     } catch (e) {
-      Core.notifyStopped('guildboss', e.message);
+      const message = String(e.message || e);
+      const reason = (!mod.running || mod.stopRequested) ? 'USER_STOP'
+        : (/GUILD_BOSS_ATTACK_RESULT_UNKNOWN/.test(message) ? 'RESULT_UNKNOWN' : 'TARGET_LOST');
+      endTurn(reason, { error: message.slice(0, 160) });
+      Core.notifyStopped('guildboss', message);
       return;
     }
     mod.running = false;
@@ -21759,6 +22516,7 @@
       dealHpThreshold = 0.7,
       dealMpThreshold = 0.85,
       maxDealRounds = 200,
+      burstHpFloor = 0.4,
     } = {}) => {
       const bossLabel = bossRegistry.corruptedPurifier.label;
       const log = [];
@@ -21768,6 +22526,27 @@
         const state = await M.readBossBattleStateOrClear(bossLabel);
         if (!state) verifiedClear = true;
         return state;
+      };
+      // 5턴 묶음은 중간에 HP를 볼 수 없다. 부활 뒤에는 5턴 한 묶음에 HP 95%가 빠졌고
+      // (2026-10-08 미나 247/4597), 같은 날 달빛뱁새·룰루비데는 부활 직후 사이클의 5턴 공격에서
+      // "도전 실패"로 끝났다. 같은 턴 수를 1턴씩 진행하며 HP가 burstHpFloor 아래면 멈추고
+      // 다음 회복 단계로 넘긴다. 반환: { turns, state } (state null = 클리어 확인).
+      const guardedTurns = async (count, label) => {
+        let turns = 0;
+        let state = null;
+        while (turns < count) {
+          M.throwIfStopped();
+          if (!(await turnBudget.spend(1, () => M.clickTurn(1)))) return { turns, state, outOfTurns: true };
+          turns++;
+          state = await readState();
+          if (!state) return { turns, state: null };
+          const ratio = state.player.hp.cur / state.player.hp.max;
+          if (turns < count && ratio < burstHpFloor) {
+            push(`[사이클 ${cycle}, ${label}] ${turns}턴 뒤 내HP ${Math.round(ratio * 100)}% < ${Math.round(burstHpFloor * 100)}% - 남은 턴 중단`);
+            break;
+          }
+        }
+        return { turns, state };
       };
       const finish = async () => {
         if (!verifiedClear && !await M.waitForBossClearEvidence(bossLabel)) {
@@ -21859,7 +22638,9 @@
             if (!(await turnBudget.spend(2, () => M.clickRecover()))) return outOfTurns();
             push(`[사이클 ${cycle}, 방깎] 내HP ${Math.round(hpRatio * 100)}% -> 회복`);
           } else {
-            if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) return outOfTurns();
+            const burst = await guardedTurns(5, '방깎');
+            if (burst.outOfTurns) return outOfTurns();
+            if (!burst.state) return await finish();
             defRounds++;
           }
           defDrop = M.getLatestBossDefenseDrop() ?? defDrop;
@@ -21900,10 +22681,11 @@
             push(`[사이클 ${cycle}] 스크롤 사용 실패(소진 추정, 이후 스크롤 없이 진행): ${e.message}`);
           }
         }
-        if (!(await turnBudget.spend(5, () => M.clickTurn(5)))) return outOfTurns();
-        state = await readState();
+        const burst = await guardedTurns(5, '딜');
+        if (burst.outOfTurns) return outOfTurns();
+        state = burst.state;
         if (!state) return await finish();
-        push(`[사이클 ${cycle}] bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
+        push(`[사이클 ${cycle}] ${burst.turns}턴 공격 bossHp=${state.boss.hp.cur} myHp=${state.player.hp.cur}/${state.player.hp.max}`);
       }
 
       return await finish();
@@ -23674,6 +24456,13 @@
       return null;
     }, 10000, 150);
     if (advanced && advanced.failed) {
+      // 사망과 턴 한도를 구분할 기록이 없었다(2026-10-08 달빛뱁새 정화자: 스크롤 1초 뒤 실패창).
+      // 결과창을 닫기 전에 턴 표시·HP·창 문구를 남긴다(기록 전용).
+      if (M.uiLog && typeof M.describeTurnStallState === 'function') {
+        let screen = '판독 실패';
+        try { screen = M.describeTurnStallState(); } catch (_) {}
+        M.uiLog(`   실패 결과창 화면: ${screen}`);
+      }
       // 실패 결과창은 확인으로 닫는다(전투는 이미 끝남). 보상은 목록 단계에서 수령된다.
       const confirm = M.findBossFailureDialogConfirm();
       if (confirm) confirm.click();
@@ -25051,17 +25840,20 @@
       );
       if (!arrived) throw new Error('마을 이동 화면으로 진입하지 못했습니다.');
     }
+    // 2026-10-26 live (10/25 패치 뒤): 문구가 "현재 위치: 심포니아 (5, 3)"으로 바뀌었다. 옛 "현재 위치는 X (a, b)"도
+    // 받는다. 이름까지 들어 있는 가장 작은 요소를 고른다(라벨이 따로 쪼개져 있을 수 있음).
+    const TOWN_LOCATION = /현재 위치(?:는|\s*:)\s*([^\s(]+)\s*\(/;
     // 실전 확인: "현재 위치는 X (a, b) 입니다." 문구는 안내 문장과 한 <p>에
     // <br>로 붙어 있어 리프 노드 검색으로는 못 찾는다. includes로 후보를
     // 찾고 가장 작은(자식 적은) 요소의 textContent에서 정규식으로 추출한다.
     const match = await M.waitFor(() => {
-      const candidates = M.queryAll('*').filter((e) => e.textContent.includes('현재 위치는'));
+      const candidates = M.queryAll('*').filter((e) => TOWN_LOCATION.test(e.textContent));
       if (!candidates.length) return null;
       const smallest = candidates.reduce(
         (best, el) => (!best || el.querySelectorAll('*').length < best.querySelectorAll('*').length ? el : best),
         null
       );
-      return smallest.textContent.match(/현재 위치는\s*(\S+)\s*\(/);
+      return smallest.textContent.match(TOWN_LOCATION);
     }, 8000, 250);
     if (!match) throw new Error('현재 위치 텍스트를 찾지 못했습니다.');
     return match[1];
@@ -26193,13 +26985,32 @@
     const failed = failedChecks2.filter((c) => !c.ok);
     if (failed.length) {
       // 포기로 받은 부분 보상과 보상 변화 없음을 구분해 남긴다(보상 단계 처치 전→후/전체).
+      // 도전하지 않은 보스를 "처치 후"로 적지 않는다(2026-10-08 달빛뱁새 허무의 황제).
+      const outcome = M.bossQueueOutcome || null;
+      const stateOf = (label) => {
+        if (!outcome) return '도전 결과 미기록';
+        if (outcome.cleared.includes(label)) return '처치·수령 확인';
+        if (outcome.failed.includes(label)) return '공략 실패';
+        return '도전 안 함';
+      };
       const describe = (c) => {
         const before = beforeByKey.get(c.key);
         const after = c.progress;
         const steps = before && after ? ` 보상 ${before.achieved}→${after.achieved}/${after.total}` : '';
-        return `${BOSS_REGISTRY[c.key].label}${steps}`;
+        const label = BOSS_REGISTRY[c.key].label;
+        return `${label}(${stateOf(label)})${steps}`;
       };
-      throw new Error(`처치 후에도 주간 보상 완료를 확인하지 못함: ${failed.map(describe).join(', ')}`);
+      // 2026-10-14 실전(룰루비데 0→0/8, 미나 3→4/8, 달빛뱁새 2→4/8): 클리어 팝업으로 처치가 확인되고
+      // 보상 수령까지 끝난 보스도 주간 단계 카운터는 일부만 움직인다. 게임이 처치를 확인한 보스를
+      // 카운터 판독만으로 "확인 못함" 이슈로 올리지 않는다 — 정보로만 남기고, 처치되지 않은 보스만 이슈다.
+      const clearedVerified = failed.filter((c) => outcome && outcome.cleared.includes(BOSS_REGISTRY[c.key].label));
+      const unresolved = failed.filter((c) => !clearedVerified.includes(c));
+      if (clearedVerified.length && M.uiLog) {
+        M.uiLog(`ℹ 처치·보상 수령 확인, 주간 보상 카운터는 일부만 변동: ${clearedVerified.map(describe).join(', ')}`);
+      }
+      if (unresolved.length) {
+        throw new Error(`보스 주간 보상 완료를 확인하지 못함: ${unresolved.map(describe).join(', ')}`);
+      }
     }
     return `보상 잔여 보스 ${remaining.length}종 처치 및 보상 수령 확인`;
   };
@@ -26229,6 +27040,7 @@
         forceChallenge,
       };
       localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
+      M.bossQueueOutcome = { cleared: [], failed: [] };
       await M.continueBossQueue();
     } finally {
       M.antiThrottle.stop();
@@ -26342,7 +27154,9 @@
       // 여기부터는 진입은 확실히 함 (entryFailStreak 리셋)
       q2.entryFailStreak = 0;
 
+        const outcome = M.bossQueueOutcome || (M.bossQueueOutcome = { cleared: [], failed: [] });
         if (result.cleared) {
+          outcome.cleared.push(entry.label);
           if (M.uiLog) M.uiLog(`✅ [큐] "${entry.label}" 완료`);
           q2.attempts = 0;
           q2.sealRechallenges = 0;
@@ -26355,15 +27169,23 @@
       // 프리셋/봉인/마나/턴 제한 오류를 재입장으로 숨기면 황제 같은 보스를
       // 계속 처음부터 시작하게 된다. 자동 재도전은 위 retryRequired
       // (망령 첫 자세 전환 실패 등) 경로에서만 허용한다.
-      q2.attempts++;
+      // 다른 보스는 각자 하루 1회 도전이라 여기서 큐를 멈추면 그 보상도 그날 잃는다
+      // (2026-10-08 달빛뱁새: 정화자 실패 뒤 허무의 황제 미도전). 실패한 보스만 기록하고
+      // 다음 보스로 넘어간다. 진입 확인 실패·사망 등 위의 중단 경로는 그대로다.
+      outcome.failed.push(entry.label);
       if (!q2.failedLabels.includes(entry.label)) q2.failedLabels.push(entry.label);
-      localStorage.removeItem(QUEUE_KEY);
-      if (M.uiLog) M.uiLog(`🛑 [큐] "${entry.label}" 공략 실패 - 자동 재도전 없이 중단`);
+      q2.attempts = 0;
+      q2.sealRechallenges = 0;
+      q2.remaining.shift();
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(q2));
+      if (M.uiLog) {
+        M.uiLog(`🛑 [큐] "${entry.label}" 공략 실패 - 같은 보스 재도전 없이 다음 보스로 (남은 ${q2.remaining.length}개)`);
+      }
       M.showBossNotice(
         `⚠ "${entry.label}" 공략이 완료되지 않았습니다.\n` +
-        '프리셋·봉인·마나·턴 제한 상태를 확인하기 위해 자동 재도전 없이 큐를 중단합니다.'
+        '같은 보스는 자동 재도전하지 않고 남은 보스를 이어서 진행합니다.'
       );
-      return;
+      continue;
     }
 
       const finalRaw = localStorage.getItem(QUEUE_KEY);
@@ -26374,7 +27196,7 @@
       if (M.uiLog) M.uiLog('=== 보스 큐 종료 ===');
       if (failedLabels.length > 0) {
         // 실패가 하나라도 있었으면 비차단 배너로 알림.
-        M.showBossNotice(`일부 보스는 재시도 끝에 처치했지만 중간에 실패가 있었습니다: ${failedLabels.join(', ')}\n로그를 확인해주세요.`);
+        M.showBossNotice(`공략에 실패한 보스가 있습니다: ${failedLabels.join(', ')}\n로그를 확인해주세요.`);
       } else if (!M.stopRequested) {
         if (M.uiLog) M.uiLog('🎉 선택한 보스를 모두 처치했습니다!');
       }
