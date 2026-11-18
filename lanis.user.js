@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.189-stable
+// @version      1.16.190-stable
 // @description  성장 기능은 현재 게임 탭에서 사용자가 하나씩 직접 호출하고, 전투/일일 기능과 실행 권한을 분리한 통합 패널.
 // @match        https://lanis.me/*
 // @noframes
@@ -13,7 +13,7 @@
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 // Compatibility artifact only. Production update authority is Operator/Bridge local approved releases.
 
-// Ranis Shared Core 1.3.186
+// Ranis Shared Core 1.3.192
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 (function (global) {
   'use strict';
@@ -21,13 +21,13 @@
   global.__lanisSharedCoreBootstrap = function (options = {}) {
     if (global.__lanisSharedCoreAdapter) {
       if (options.mode !== 'headless') {
-        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.186' });
+        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.192' });
         global.__mountLanisUnifiedPanel?.();
         global.__mountLanisBossTool?.();
       }
       return global.__lanisSharedCoreAdapter;
     }
-    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.186' });
+    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.192' });
 (function () {
   'use strict';
 
@@ -712,15 +712,41 @@
     );
   };
 
+  // 2026-11-18 수면양말 실화면(게임 업데이트 buildId bea9e4eb, 11/17 00:03 KST): 내 정보의 기본 정보·
+  // 직업 숙련도가 "속성: 불" 한 잎에서 이름 칸과 값 칸으로 나뉘었다.
+  //   <div><div><p>속성</p></div><p>불</p></div>
+  // 이름이 정확히 label인 잎에서 이름만 담은 조상을 지나 첫 행까지 올라가, 행 글자에서 이름을 뺀 값을 모은다.
+  Core.statusRowValues = function (label, root = null) {
+    const values = [];
+    for (const leaf of Core.gameElements('p')) {
+      if (root && !root.contains(leaf)) continue;
+      if (leaf.children.length !== 0 || leaf.textContent.trim() !== label) continue;
+      if (Core.isElementVisible && !Core.isElementVisible(leaf)) continue;
+      let row = leaf.parentElement;
+      for (let depth = 0; row && depth < 3 && row.textContent.trim() === label; depth++) row = row.parentElement;
+      const text = row ? row.textContent.trim() : '';
+      if (!text.startsWith(label)) continue;
+      const value = text.slice(label.length).trim();
+      if (value) values.push(value);
+    }
+    return values;
+  };
+
   Core.readCharacterElementOnStatus = function () {
     const leaf = Core.gameElements('*').find(
       (el) =>
         el.children.length === 0 &&
         /^속성\s*:\s*(불|물|번개|별|바람|빛|어둠)$/.test(el.textContent.trim())
     );
-    if (!leaf) return null;
-    const match = leaf.textContent.trim().match(/^속성\s*:\s*(.+)$/);
-    return match ? match[1].trim() : null;
+    if (leaf) {
+      const match = leaf.textContent.trim().match(/^속성\s*:\s*(.+)$/);
+      return match ? match[1].trim() : null;
+    }
+    // 2026-11-17 화면: 이름 칸 "속성" + 값 칸 "불" (값이 둘 이상 다르게 보이면 판정하지 않는다).
+    // 이 모양은 다른 화면(보스 전투 등)의 "속성" 행과 구별되지 않으므로 /status에서만 읽는다.
+    if (location.pathname.replace(/\/$/, '') !== '/status') return null;
+    const values = Core.statusRowValues('속성').filter((value) => Core.ELEMENT_OPTIONS.includes(value));
+    return values.length > 0 && values.every((value) => value === values[0]) ? values[0] : null;
   };
 
   Core.goToCharacterPage = async function (itemText, expectedPath) {
@@ -784,7 +810,37 @@
 
     // 반드시 "보상"만 켜서, 상자를 열었을 때 생기는 "상급 유물 상자" 같은
     // 다른 카테고리 아이템이 목록에 섞이지 않게 한다.
-    await Core.selectOnlyInventoryCategory('보상', moduleId);
+    // 2026-11-17 화면(번들 TwoLevelFilterBar-*.js): "보상" 토글이 없고, 2단 필터의 대분류 묶음
+    // [aria-label="소모품 분류"](전체·상자·연금·지도·장비·성장·기타, 눌림=aria-pressed)에서 "상자"를 고른다
+    // (보상 상자는 상자>보스·던전에 든다). 어느 필터도 못 찾거나 눌림을 확인하지 못하면 아무것도 쓰지 않고 멈춘다
+    // (11/18: 못 찾고 조용히 넘어가 다른 소모품을 썼다, 메인2 지시).
+    const findNewBoxCategory = () => {
+      const group = Core.gameElements('[aria-label="소모품 분류"]').find((el) => Core.isElementVisible(el));
+      return group ? [...group.querySelectorAll('button')].find((b) => b.textContent.trim() === '상자') || null : null;
+    };
+    const ensureRewardFilter = async () => {
+      if (Core.findButtonByText('보상')) {
+        await Core.selectOnlyInventoryCategory('보상', moduleId);
+        if (Core.findButtonByText('보상')?.getAttribute('aria-pressed') !== 'true') {
+          throw new Error('인벤토리 "보상" 필터가 켜진 것을 확인하지 못해 보상 상자 사용을 멈춥니다.');
+        }
+        return 'legacy';
+      }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const box = findNewBoxCategory();
+        if (!box) break;
+        if (box.getAttribute('aria-pressed') === 'true') return 'box';
+        await Core.humanDelay(300, 600);
+        Core.dispatchRealClick(box);
+        await Core.humanDelay(400, 700);
+        if (findNewBoxCategory()?.getAttribute('aria-pressed') === 'true') return 'box';
+      }
+      throw new Error('소모품 "보상" 필터도 새 "상자" 분류도 찾지(켜지) 못해 보상 상자 사용을 멈춥니다(아무것도 쓰지 않음).');
+    };
+    const filterMode = await ensureRewardFilter();
+    Core.log(moduleId, filterMode === 'legacy'
+      ? '인벤토리 필터: "보상"만 켬'
+      : '인벤토리 필터: 새 2단 필터 "상자" 분류 켬 - 이름이 "…보상"인 행만 사용');
 
     let used = 0;
     const maxAttempts = 50;
@@ -795,13 +851,27 @@
     const useButtonOf = (tr, enabledOnly) => [...tr.querySelectorAll('button')].find((b) =>
       b.textContent.trim() === '사용' &&
       (!enabledOnly || (!b.disabled && b.getAttribute('aria-disabled') !== 'true'))) || null;
+    // 2026-11-17 게임 업데이트(번들 useItemFilters-*.js): 소모품 탭의 다중 토글(연금·책·보상·상자·지도·기타)이
+    // 2단 필터(상자/연금/지도/장비/성장/기타)로 바뀌어 "보상" 버튼이 없다. 그래서 필터가 걸리지 않은 채
+    // 목록 첫 활성 행(아무 소모품)을 확인창 기본값(최대 수량)으로 썼다(11/18 4명 x 50회). 필터에 기대지 않고,
+    // 예전 "보상" 필터와 같은 기준(이름 끝 괄호를 뗀 뒤 "보상"으로 끝남)의 행만 쓴다.
+    const rewardBoxNameOf = (tr) => {
+      const cell = typeof tr.querySelector === 'function' ? tr.querySelector('td') : null;
+      return String((cell || tr).textContent || '').replace(/\s+/g, ' ').trim()
+        .replace(/\s*사용$/, '').replace(/\s*[x×]?\s*[\d,]+$/, '').trim();
+    };
+    const isRewardBoxName = (name) => {
+      let base = String(name || '').replace(/\s+/g, ' ').trim();
+      while (/\s*\([^()]*\)$/.test(base)) base = base.replace(/\s*\([^()]*\)$/, '').trim();
+      return /보상$/.test(base);
+    };
     const findUsableRow = () => Core.gameElements('tr').find(
-      (tr) => useButtonOf(tr, true) && Core.isElementVisible(tr)
+      (tr) => useButtonOf(tr, true) && Core.isElementVisible(tr) && isRewardBoxName(rewardBoxNameOf(tr))
     );
     const unusable = new Set();
     const noteUnusableRows = () => {
       for (const tr of Core.gameElements('tr')) {
-        if (Core.isElementVisible(tr) && useButtonOf(tr, false) && !useButtonOf(tr, true)) {
+        if (Core.isElementVisible(tr) && isRewardBoxName(rewardBoxNameOf(tr)) && useButtonOf(tr, false) && !useButtonOf(tr, true)) {
           unusable.add(String(tr.textContent || '').replace(/\s+/g, ' ').replace(/\s*사용\s*$/, '').trim().slice(0, 40));
         }
       }
@@ -815,10 +885,15 @@
       // 믿는 대신, 매 반복 시작 시 "보상" 버튼이 실제로 눌려있는지 빠르게
       // 확인하고 아니면 다시 정렬한다 - 어떤 이유로 필터가 흐트러져도 다음
       // 아이템을 열기 전에 스스로 바로잡는다.
-      const rewardTabBtn = Core.findButtonByText('보상');
-      if (!rewardTabBtn || rewardTabBtn.getAttribute('aria-pressed') !== 'true') {
-        Core.log(moduleId, '⚠ "보상" 카테고리 필터가 풀려있어 다시 정렬합니다.');
-        await Core.selectOnlyInventoryCategory('보상', moduleId);
+      // 11/17 화면은 "보상" 토글 대신 새 "상자" 분류가 켜져 있는지 본다. 풀렸으면 다시 켜고, 못 켜면 멈춘다.
+      const filterOn = filterMode === 'legacy'
+        ? Core.findButtonByText('보상')?.getAttribute('aria-pressed') === 'true'
+        : findNewBoxCategory()?.getAttribute('aria-pressed') === 'true';
+      if (!filterOn) {
+        Core.log(moduleId, `⚠ "${filterMode === 'legacy' ? '보상' : '상자'}" 필터가 풀려있어 다시 정렬합니다.`);
+        if ((await ensureRewardFilter()) !== filterMode) {
+          throw new Error('인벤토리 필터 화면이 실행 중에 바뀌어 보상 상자 사용을 멈춥니다.');
+        }
       }
 
       // 필터를 켠 직후나 상자를 쓴 직후에는 목록이 다시 그려지는 중일 수 있다. 한 번만 읽으면
@@ -882,6 +957,14 @@
       // 심층던전/아레나 단계가 전부 "상단 메뉴 버튼을 찾을 수 없음"으로
       // 실패했다(모달이 화면을 덮고 있었기 때문). 수량 입력은 절대 건드리지
       // 않고 기본값(보유 수량 전체) 그대로 확정한다.
+      // 확인창 문구의 아이템 이름(<strong>)도 보상 상자인지 대조한다. 다르면 취소하고 멈춘다(누르지 않음).
+      const shownName = typeof dialog.querySelector === 'function' && dialog.querySelector('strong')
+        ? String(dialog.querySelector('strong').textContent || '').trim() : null;
+      if (shownName !== null && !isRewardBoxName(shownName)) {
+        const cancelBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+        if (cancelBtn) await Core.safeClick(() => cancelBtn, { beforeMin: 300, beforeMax: 600, shouldCancel });
+        throw new Error(`보상 상자 확인창의 아이템이 보상 상자가 아닙니다("${shownName.slice(0, 40)}") - 사용하지 않고 멈춥니다.`);
+      }
       const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
       if (!confirmBtn) throw new Error('보상 상자 사용 확인 버튼을 찾지 못했습니다.');
       if (confirmBtn.disabled) throw new Error('보상 상자 사용 확인 버튼이 비활성화 상태입니다.');
@@ -889,7 +972,7 @@
         throw new Error('보상 상자 사용을 확정하지 못했습니다.');
       }
       used++;
-      Core.log(moduleId, `보상 상자 사용 ${used}개째 완료`);
+      Core.log(moduleId, `보상 상자 사용 ${used}개째 완료: ${(shownName || rewardBoxNameOf(row)).slice(0, 40)}`);
 
       // ⚠ 상자를 하나 쓰면 그 종류가 목록에서 통째로 사라지거나 수량이
       // 바뀌면서 페이지 구성이 흔들릴 수 있다. 안전하게 1페이지로 되돌아가
@@ -2035,8 +2118,9 @@
   // 이미 이 페이지(/status)에 들어가므로, 그 타이밍에 같이 확인한다(별도 이동 불필요).
   Core.readHealthPercentages = function () {
     const text = Core.bodyText();
-    const hpMatch = text.match(/HP\s*건강도:\s*(\d+)%/);
-    const mpMatch = text.match(/MP\s*건강도:\s*(\d+)%/);
+    // 2026-11-17 화면부터 "HP 건강도"와 "100%"가 다른 칸(bodyText에서는 다른 줄)이라 쌍점은 없어도 된다.
+    const hpMatch = text.match(/HP\s*건강도\s*:?\s*(\d+)%/);
+    const mpMatch = text.match(/MP\s*건강도\s*:?\s*(\d+)%/);
     return {
       hp: hpMatch ? parseInt(hpMatch[1], 10) : null,
       mp: mpMatch ? parseInt(mpMatch[1], 10) : null,
@@ -4047,9 +4131,17 @@
     while (bought < total) {
       if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', bought };
       const quantity = Math.min(AUTUMN_SHOP_MAX_PER_BUY, total - bought);
-      const card = mod.findShopBookCard();
-      if (!card || card.button.disabled) throw new Error(`숙련 교본 상자 "구매" 버튼이 없거나 비활성입니다(${bought}/${total}개 산 뒤).`);
-      if (!(await Core.safeClick(() => mod.findShopBookCard()?.button || null, { beforeMin: 450, beforeMax: 800, shouldCancel }))) {
+      // 실번들(AutumnEvent 상점): 구매창 "구매" → buyingId 설정·창 닫기 → 구매 요청 → 상점 다시 불러오기(여기서 보유 토큰이
+      // 바뀐다) → 상위 갱신 → buyingId 해제. 카드 "구매" 버튼은 buyingId가 풀릴 때까지 비활성이라, 토큰이 줄어든 직후에는
+      // 아직 비활성일 수 있다(미나 11/10 06:07 "99/103개 산 뒤" 실패, 돈땃쥐미 05:53은 같은 코드로 99+5 성공).
+      // 그래서 다시 활성될 때까지 기다린 뒤 누른다. 판정은 그대로 토큰·상자 개수다.
+      const enabledCard = () => { const found = mod.findShopBookCard(); return found && !found.button.disabled ? found : null; };
+      const card = await Core.waitFor(enabledCard, 20000, 250, shouldCancel);
+      if (!card) {
+        if (shouldCancel()) return { ok: true, stopped: true, code: 'STOPPED', bought };
+        throw new Error(`숙련 교본 상자 "구매" 버튼이 없거나 비활성입니다(${bought}/${total}개 산 뒤, 20초 기다림).`);
+      }
+      if (!(await Core.safeClick(() => enabledCard()?.button || null, { beforeMin: 450, beforeMax: 800, shouldCancel }))) {
         throw new Error('숙련 교본 상자 "구매" 버튼을 누르지 못했습니다.');
       }
       const dialog = await Core.waitFor(() => Core.gameElements('[role="dialog"]').find((el) => Core.isElementVisible(el) &&
@@ -6033,8 +6125,20 @@
   Modules.daily.parseGoldState = function (text) {
     const body = String(text || '').replace(/\s+/g, ' ');
     const num = (re) => { const m = body.match(re); return m ? Number(m[1].replace(/,/g, '')) : null; };
-    const held = num(/(?:^|[^가-힣])골드:\s*([\d,]+)/);
-    const bank = num(/(?:^|[^가-힣])은행:\s*([\d,]+)/);
+    let held = num(/(?:^|[^가-힣])골드:\s*([\d,]+)/);
+    let bank = num(/(?:^|[^가-힣])은행:\s*([\d,]+)/);
+    if (!Number.isFinite(held) || !Number.isFinite(bank)) {
+      // 2026-11-18 수면양말 실화면(게임 업데이트 11/17): 이름 칸과 값 칸이 나뉘어 innerText가
+      // "골드\n\n749,422\n\n은행\n\n110,536,962"다. 이름만 있는 줄 바로 다음 줄의 숫자만 값으로 읽는다
+      // (패널 로그 "은행 657,581 G"나 거래소 "보유 은행 골드:"는 한 줄이라 걸리지 않는다).
+      const raw = String(text || '');
+      const line = (label) => {
+        const m = raw.match(new RegExp(`(?:^|\\n)[ \\t]*${label}[ \\t]*\\n\\s*([\\d,]+)[ \\t]*(?:\\n|$)`));
+        return m ? Number(m[1].replace(/,/g, '')) : null;
+      };
+      held = line('골드');
+      bank = line('은행');
+    }
     if (!Number.isFinite(held) || !Number.isFinite(bank)) return null;
     return { held, bank, total: held + bank };
   };
@@ -11346,7 +11450,8 @@
     await Core.waitFor(() => Core.bodyText().includes('강함 점수'));
 
     const match = await Core.retryStep('강함 점수 텍스트 찾기', () => {
-      const m = Core.bodyText().match(/강함 점수:\s*([\d,]+)/);
+      // 2026-11-17 화면부터 "강함 점수"와 값이 다른 칸(bodyText에서는 다른 줄)이라 쌍점은 없어도 된다.
+      const m = Core.bodyText().match(/강함 점수\s*:?\s*([\d,]+)/);
       return m || null;
     });
     if (!match) {
@@ -18176,7 +18281,12 @@
           const el = all[i];
           const own = text(el).replace(/🔒/g, '').trim();
           if (!own || !inside(el, card) || Core.ELEMENT_OPTIONS.includes(own) || own === headName) continue;
-          if ([...el.children].some((child) => text(child))) continue;
+          // 2026-11-17 게임 업데이트(번들 GuildBoss-DEPPa9eK.js): 칩이 MUI Chip
+          // <div><svg/>(자물쇠, 글자 없음)<span>맥스 샤프니스</span></div>로 바뀌어 이름이 자식 span에 있다
+          // (11/12 기록은 <span>🔒 맥스 샤프니스</span>). 글자 가진 자식이 잎 하나뿐인 칩은 그 칩 하나로 센다.
+          const textChildren = [...el.children].filter((child) => text(child));
+          const iconChip = textChildren.length === 1 && textChildren[0].children.length === 0;
+          if (textChildren.length && !iconChip) continue;
           // 2차 검수: 자물쇠 아이콘(글자 없는 자식 요소)이 붙은 칩만 봉인으로 센다. 아이콘을 못 찾으면
           // 봉인으로 치지 않는다(멈추는 쪽으로 실패).
           if (![...el.children].some((child) => !text(child))) continue;
@@ -20081,11 +20191,19 @@
     target.click();
   };
 
-  Modules.trainingdecisions.readLeafNumber = function (pattern, label) {
+  // rows: 2026-11-17 게임 업데이트 뒤 화면처럼 이름 칸과 값 칸이 나뉜 행({ label, root })을
+  // 예전 "이름: 값" 잎이 하나도 없을 때만 읽는다(2026-11-18 수면양말 실화면).
+  Modules.trainingdecisions.readLeafNumber = function (pattern, label, rows = null) {
     const matches = Core.gameElements('*').filter((el) => {
       if (el.children.length !== 0 || !Core.isElementVisible(el)) return false;
       return pattern.test(this.normalizeText(el.textContent));
     });
+    if (matches.length === 0 && rows) {
+      const values = Core.statusRowValues(rows.label, rows.root || null).map((value) => this.normalizeText(value));
+      if (values.length !== 1) throw new Error(`${label} 표시를 정확히 1개 찾지 못했습니다 (${values.length}개).`);
+      const row = values[0].match(/^([\d,]+)$/);
+      return trainingDecisionInteger(Number((row?.[1] || '').replace(/,/g, '')), label);
+    }
     if (matches.length !== 1) throw new Error(`${label} 표시를 정확히 1개 찾지 못했습니다 (${matches.length}개).`);
     const match = this.normalizeText(matches[0].textContent).match(pattern);
     const value = Number((match?.[1] || '').replace(/,/g, ''));
@@ -20093,21 +20211,28 @@
   };
 
   Modules.trainingdecisions.readGeneralMastery = function () {
-    return this.readLeafNumber(/^숙련도:\s*([\d,]+)$/, '일반 숙련도');
+    return this.readLeafNumber(/^숙련도:\s*([\d,]+)$/, '일반 숙련도', { label: '숙련도' });
   };
 
   Modules.trainingdecisions.readStatusDom = function () {
     const headings = Core.gameElements('h5').filter((el) => Core.isElementVisible(el) && this.normalizeText(el.textContent));
     if (headings.length !== 1) throw new Error(`상태 화면 캐릭터 이름을 정확히 1개 찾지 못했습니다 (${headings.length}개).`);
-    const classLeaves = Core.gameElements('p').filter((el) => {
+    const classLeavesIn = (selector) => Core.gameElements(selector).filter((el) => {
       const text = this.normalizeText(el.textContent);
       return Core.isElementVisible(el) && Object.prototype.hasOwnProperty.call(TRAINING_DECISION_CLASS_TO_JOB, text);
     });
+    let classLeaves = classLeavesIn('p');
+    // 2026-11-17 화면: 전직명이 이름 아래 <span>검제</span>(옆에 Lv. 100)로 바뀌었다
+    if (classLeaves.length === 0) classLeaves = classLeavesIn('span').filter((el) => el.children.length === 0);
     if (classLeaves.length !== 1) throw new Error(`현재 전직명을 정확히 1개 찾지 못했습니다 (${classLeaves.length}개).`);
     const className = this.normalizeText(classLeaves[0].textContent);
     const jobMastery = trainingDecisionEmptyJobMastery();
+    // 2026-11-17 화면: "검술 숙련도: N" 대신 "직업 숙련도" 묶음 안의 "검술" 행
+    const jobSection = Core.gameElements('h6').find((el) =>
+      Core.isElementVisible(el) && this.normalizeText(el.textContent) === '직업 숙련도')?.parentElement || null;
     for (const job of TRAINING_DECISION_JOBS) {
-      jobMastery[job] = this.readLeafNumber(new RegExp(`^${job} 숙련도:\\s*([\\d,]+)$`), `${job} 숙련도`);
+      jobMastery[job] = this.readLeafNumber(new RegExp(`^${job} 숙련도:\\s*([\\d,]+)$`), `${job} 숙련도`,
+        jobSection ? { label: job, root: jobSection } : null);
     }
     return Object.freeze({
       character: this.normalizeText(headings[0].textContent),
@@ -26811,8 +26936,10 @@
     const set = new Set();
     const logContainer = M.getLogContainer();
     if (!logContainer) return set;
+    // 11/18 15:02 호비 실화면: 최신 항목 시각이 "-1초 전"으로 그려져 다음 렌더까지 남는다
+    // (서버 기록 시각이 PC 시계보다 앞섬). 음수도 같은 항목 시각이다.
     const tsLeaves = [...logContainer.querySelectorAll('*')].filter(
-      (el) => el.children.length === 0 && /^\d+(초|분)\s*전$/.test(el.textContent.trim())
+      (el) => el.children.length === 0 && /^-?\d+(초|분)\s*전$/.test(el.textContent.trim())
     );
     for (const leaf of tsLeaves) {
       const entryText = leaf.parentElement.textContent;
@@ -26821,6 +26948,28 @@
       const lockPart = entryText.slice(lockIdx);
       for (const name of candidates) {
         if (lockPart.includes(name)) set.add(name);
+      }
+    }
+    // 2026-11-17 게임 업데이트(번들 index-BJuRD5zJ, 11/16 15:02 GMT): 봉인 칩의 🔒 글자가
+    // 자물쇠 아이콘 <svg role="img" aria-label="봉인">으로 바뀌었다. 칩 글자는 이제
+    // "불굴, 엔드 블로킹"뿐이라 위 🔒 판독이 늘 빈 값이었다(11/18 달빛뱁새 정화자·쫀떡 황제
+    // 20회 재도전 모두 sealed=). 아이콘과 같은 칩(아이콘의 부모) 글자에서만 이름을 찾는다.
+    // 아이콘은 전투 항목 안의 것만 센다: 타임스탬프에서 위로 올라가되 다른 항목의 타임스탬프나
+    // "전투 기록 (" 제목을 품기 직전까지가 그 항목이다(로그 칸이 짧으면 getLogContainer가 위로 넓어짐).
+    const isMarker = (el) => el.children.length === 0 && el.textContent.trim().startsWith('전투 기록 (');
+    for (const leaf of tsLeaves) {
+      let entry = leaf.parentElement;
+      for (let node = entry; node && node !== logContainer; node = node.parentElement) {
+        const inside = [...node.querySelectorAll('*')];
+        if (inside.filter((el) => tsLeaves.includes(el)).length > 1 || inside.some(isMarker)) break;
+        entry = node;
+      }
+      if (!entry) continue;
+      for (const icon of entry.querySelectorAll('[aria-label="봉인"]')) {
+        const chipText = icon.parentElement ? icon.parentElement.textContent : '';
+        for (const name of candidates) {
+          if (chipText.includes(name)) set.add(name);
+        }
       }
     }
     return set;
@@ -26835,7 +26984,7 @@
     if (state.player.hp.cur <= 0) return { ok: false, reason: '플레이어 사망 감지' };
     const logContainer = M.getLogContainer();
     const hasReadableLog = !!logContainer && [...logContainer.querySelectorAll('*')]
-      .some((el) => el.children.length === 0 && /^\d+(초|분)\s*전$/.test(el.textContent.trim()));
+      .some((el) => el.children.length === 0 && /^-?\d+(초|분)\s*전$/.test(el.textContent.trim()));
     if (!hasReadableLog) return { ok: false, reason: '봉인 전투 로그를 읽지 못함' };
     return { ok: true };
   };
@@ -27801,9 +27950,25 @@
       M.isVisible(el) &&
       /^속성\s*:\s*(불|물|번개|별|바람|빛|어둠)$/.test(el.textContent.trim())
     );
-    if (!leaf) return null;
-    const match = leaf.textContent.trim().match(/^속성\s*:\s*(.+)$/);
-    return match ? match[1].trim() : null;
+    if (leaf) {
+      const match = leaf.textContent.trim().match(/^속성\s*:\s*(.+)$/);
+      return match ? match[1].trim() : null;
+    }
+    // 2026-11-18 수면양말 실화면(게임 업데이트 11/17): 이름 칸 <p>속성</p>과 값 칸 <p>불</p>이 나뉘었다
+    //   <div><div><p>속성</p></div><p>불</p></div> — 이름만 담은 조상을 지나 첫 행에서 값을 읽는다.
+    // 이 모양은 전투 화면의 보스 "속성" 행과 구별되지 않으므로 /status에서만 읽는다.
+    if (location.pathname.replace(/\/$/, '') !== '/status') return null;
+    const elements = ['불', '물', '번개', '별', '바람', '빛', '어둠'];
+    const values = [];
+    for (const label of M.queryAll('p')) {
+      if (label.children.length !== 0 || label.textContent.trim() !== '속성' || !M.isVisible(label)) continue;
+      let row = label.parentElement;
+      for (let depth = 0; row && depth < 3 && row.textContent.trim() === '속성'; depth++) row = row.parentElement;
+      const text = row ? row.textContent.trim() : '';
+      const value = text.startsWith('속성') ? text.slice('속성'.length).trim() : '';
+      if (elements.includes(value)) values.push(value);
+    }
+    return values.length > 0 && values.every((value) => value === values[0]) ? values[0] : null;
   };
 
   M.goToBossListViaMenu = async () => {
