@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         lanis
 // @namespace    lanis
-// @version      1.16.190-stable
+// @version      1.16.191-stable
 // @description  성장 기능은 현재 게임 탭에서 사용자가 하나씩 직접 호출하고, 전투/일일 기능과 실행 권한을 분리한 통합 패널.
 // @match        https://lanis.me/*
 // @noframes
@@ -13,7 +13,7 @@
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 // Compatibility artifact only. Production update authority is Operator/Bridge local approved releases.
 
-// Ranis Shared Core 1.3.192
+// Ranis Shared Core 1.3.196
 // GENERATED FILE — DO NOT EDIT. Authoritative sources: src/normal/* and src/boss/*.js.
 (function (global) {
   'use strict';
@@ -21,13 +21,13 @@
   global.__lanisSharedCoreBootstrap = function (options = {}) {
     if (global.__lanisSharedCoreAdapter) {
       if (options.mode !== 'headless') {
-        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.192' });
+        global.__lanisSharedCoreOptions = Object.freeze({ mode: 'manual', version: '1.3.196' });
         global.__mountLanisUnifiedPanel?.();
         global.__mountLanisBossTool?.();
       }
       return global.__lanisSharedCoreAdapter;
     }
-    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.192' });
+    global.__lanisSharedCoreOptions = Object.freeze({ mode: options.mode === 'headless' ? 'headless' : 'manual', version: '1.3.196' });
 (function () {
   'use strict';
 
@@ -214,6 +214,150 @@
     return [...smallest.querySelectorAll('button')].find((b) => b.textContent.trim() === buttonText) || null;
   };
 
+  // ⚠ 2026-11-18 사용자 "모르면 안 눌러야지": 아이템을 쓰거나 사기 전에는 무엇을 누르는지 이름으로 정확히 확인한다.
+  // 인벤토리 행 이름 = 첫 칸 글자에서 🔗(귀속 표시)와 "x수량" 꼬리를 뗀 것(확장 content.js marketInvName과 같음 —
+  // 11/18 새 UI에서 팩 사용으로 실화면 확인됨). 포함(includes)으로 고르면 "불의 돌"이 "거대한 불의 돌"에도 맞는다.
+  Core.normalizeItemName = function (text) {
+    return String(text || '').replace(/\u{1F517}️?/gu, ' ').replace(/\s+/g, ' ').trim();
+  };
+  Core.inventoryRowItemName = function (tr) {
+    const first = tr && typeof tr.querySelector === 'function' ? tr.querySelector('td') : null;
+    if (!first) return '';
+    return Core.normalizeItemName(first.textContent).replace(/\s*사용$/, '').replace(/\s*[xX×]\s*[\d,]+$/, '').trim();
+  };
+  // 같은 아이템인지: 정확히 같거나, 귀속 표시 "(귀속)"만 다른 경우(같은 종류의 귀속본)만 같다고 본다.
+  Core.sameItemName = function (a, b) {
+    const base = (value) => Core.normalizeItemName(value).replace(/\s*\(귀속\)$/, '').trim();
+    const left = Core.normalizeItemName(a);
+    const right = Core.normalizeItemName(b);
+    return !!left && !!right && (left === right || base(left) === base(right));
+  };
+  // 행 안에서 글자가 정확히 itemName(또는 귀속본)인 요소가 있는지(상점 행: 아이콘 + 이름 Typography).
+  Core.rowHasExactItemName = function (row, itemName) {
+    if (!row || typeof row.querySelectorAll !== 'function') return false;
+    return [...row.querySelectorAll('*')].some((el) => el.tagName !== 'BUTTON' && !el.closest('button') &&
+      Core.sameItemName(el.textContent, itemName));
+  };
+  // 보이는 [role="dialog"] 가운데 marker 글자를 포함하고 isTarget(dialog)가 참인 창이 정확히 1개일 때만 그 창을 준다.
+  // 문서 전체나 "확인"이 있는 아무 창에서 버튼을 찾지 않는다(그 아이템을 말하는 창 안에서만 누른다).
+  Core.findItemDialog = function (marker, isTarget) {
+    const dialogs = [...document.querySelectorAll('[role="dialog"]')].filter((d) =>
+      !d.closest('#lrm-panel') && !d.closest('#lrm-banner') && Core.isElementVisible(d) &&
+      (!marker || String(d.textContent || '').includes(marker)) && (!isTarget || isTarget(d)));
+    return dialogs.length === 1 ? dialogs[0] : null;
+  };
+  // 인벤토리 행의 보유 수량: 둘째 칸 "76"(또는 "x76"·"76개"), 없으면 첫 칸 꼬리 "x76". 꼬리도 없고 둘째 칸도 못 읽으면 null.
+  Core.inventoryRowCount = function (tr) {
+    const cells = tr && typeof tr.querySelectorAll === 'function' ? [...tr.querySelectorAll('td')] : [];
+    const second = Core.normalizeItemName(cells[1] ? cells[1].textContent : '');
+    const match = second.match(/^x?\s*([\d,]+)\s*개?$/) || Core.normalizeItemName(cells[0] ? cells[0].textContent : '').match(/[x×]\s*([\d,]+)$/);
+    return match ? Number(match[1].replace(/,/g, '')) : null;
+  };
+  // 지금 화면 목록에서 그 이름(귀속본 포함) 행들의 보유 수량 합. 목록이 안 보이거나 수량을 못 읽으면 null.
+  Core.visibleItemCount = function (itemName) {
+    const rows = Core.gameElements('tr').filter((tr) => typeof tr.querySelector === 'function' && tr.querySelector('td') && Core.isElementVisible(tr));
+    if (!rows.length) return null;
+    let total = 0;
+    for (const tr of rows) {
+      if (!Core.sameItemName(Core.inventoryRowItemName(tr), itemName)) continue;
+      const count = Core.inventoryRowCount(tr);
+      if (count === null) return null;
+      total += count;
+    }
+    return total;
+  };
+  // 누른 뒤 보유 수량: 바뀔 때까지 최대 4초 기다렸다가 마지막으로 읽은 값(못 읽으면 null → "?").
+  Core.readItemCountAfter = async function (itemName, before, shouldCancel = Core.defaultShouldCancel) {
+    let last = null;
+    await Core.waitFor(() => {
+      last = Core.visibleItemCount(itemName);
+      return last !== null && last !== before ? true : null;
+    }, 4000, 250, shouldCancel);
+    return last;
+  };
+  // 확인창 수량 칸 값. 수량 칸이 없으면 1(게임 ItemUseDialog는 최대 1개일 때 칸을 숨기고, 공용 확인창은 1개만 쓴다).
+  // 칸이 둘 이상이거나 값을 읽지 못하면 null → 호출자는 누르지 않고 멈춘다.
+  Core.dialogQuantity = function (dialog) {
+    const inputs = dialog && typeof dialog.querySelectorAll === 'function' ? [...dialog.querySelectorAll('input[type="number"]')] : [];
+    if (inputs.length === 0) return 1;
+    if (inputs.length > 1) return null;
+    const value = Number(inputs[0].value);
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  };
+  // ⚠ 2026-11-18 사용자 "뭘 사용했는지 왜 로그에 안 남겨": 아이템을 쓰거나 사거나 조합하는 확정 버튼을 누를 때마다
+  // 이름·수량·누르기 전/후 보유 수량·단계를 한 줄로 남긴다(Core.log → Operator 이벤트 로그 browser.trace).
+  // 읽지 못한 값은 "?"로 남긴다(지어내지 않는다).
+  Core.formatItemCount = function (value) {
+    return Number.isFinite(value) ? Number(value).toLocaleString('ko-KR') : '?';
+  };
+  Core.logItemAction = function (moduleId, { stage, action = '사용', item, quantity, before, after, holding = '보유', extra } = {}) {
+    const f = Core.formatItemCount;
+    Core.log(moduleId, `🧾 아이템 ${action} · 단계 ${stage || '?'} · ${item || '?'} · 수량 ${f(quantity)} · ${holding} ${f(before)} → ${f(after)}${extra ? ` · ${extra}` : ''}`);
+  };
+  // 상점 구매 확인창의 보유 골드·구매 비용(번들 Shop: "보유 골드 N G", "구매 비용 -N G"). 못 읽으면 null.
+  Core.readShopDialogGold = function (dialog) {
+    const text = String(dialog && dialog.textContent || '');
+    const gold = text.match(/보유\s*골드\s*([\d,]+)\s*G/);
+    const cost = text.match(/구매\s*비용[\s\S]*?-([\d,]+)\s*G/);
+    return { gold: gold ? Number(gold[1].replace(/,/g, '')) : null, cost: cost ? Number(cost[1].replace(/,/g, '')) : null };
+  };
+  // 소모품 목록이 "전체" 분류인지 확인한다(11/17 화면: [aria-label="소모품 분류"] 묶음, 눌림=aria-pressed, 실화면
+  // 11/18 이라 9310에서 "전체" 기본 눌림 확인). 다른 분류가 눌려 있으면 "전체"를 누르고 다시 확인한다. 묶음이나
+  // "전체"를 찾지 못하거나 켜졌는지 확인하지 못하면, 목록에 없다는 판단을 믿을 수 없으므로 멈춘다.
+  Core.ensureConsumableCategoryAll = async function (purpose, shouldCancel = Core.defaultShouldCancel) {
+    const allButton = () => {
+      const group = Core.gameElements('[aria-label="소모품 분류"]').find((el) => Core.isElementVisible(el));
+      return group ? [...group.querySelectorAll('button')].find((b) => b.textContent.trim() === '전체') || null : null;
+    };
+    await Core.waitFor(() => allButton(), 6000, 200, shouldCancel);
+    for (let attempt = 0; attempt <= 3; attempt++) {
+      if (shouldCancel && shouldCancel()) throw new Error(`사용자가 정지했습니다("${purpose}" 확인 중).`);
+      const btn = allButton();
+      if (!btn) break;
+      if (btn.getAttribute('aria-pressed') === 'true') return true;
+      if (attempt === 3) break;
+      await Core.humanDelay(300, 600);
+      Core.dispatchRealClick(btn);
+      await Core.humanDelay(400, 700);
+    }
+    throw new Error(`소모품 분류 "전체"가 켜진 것을 확인하지 못했습니다("${purpose}" 확인) - 목록을 믿을 수 없어 진행하지 않고 멈춥니다.`);
+  };
+  // 인벤토리는 마지막으로 보던 페이지를 유지한다. 검색 전에 1페이지로 돌아가고, 정말 1페이지가 됐는지 다시 읽는다
+  // (MUI Pagination: 지금 페이지 = aria-label "page N", 1페이지 버튼 = "Go to page 1"). 페이지가 하나뿐이면 그대로.
+  // 돌아가지 못하면 일부 페이지만 보고 "없음"으로 판단하게 되므로 멈춘다.
+  Core.goInventoryFirstPage = async function (purpose, shouldCancel = Core.defaultShouldCancel) {
+    const currentPage = () => Core.gameElements('button').find((b) =>
+      /^page\s+\d+$/.test(b.getAttribute('aria-label') || '') && Core.isElementVisible(b)) || null;
+    const now = currentPage();
+    if (!now || now.getAttribute('aria-label') === 'page 1') return true;
+    const first = Core.gameElements('button').find((b) =>
+      b.getAttribute('aria-label') === 'Go to page 1' && !b.disabled && Core.isElementVisible(b)) || null;
+    if (!first || !(await Core.safeClick(first, { beforeMin: 450, beforeMax: 800, afterMin: 550, afterMax: 900, shouldCancel }))) {
+      throw new Error(`"${purpose}" 검색을 위해 소모품 1페이지로 돌아가지 못했습니다 - 진행하지 않고 멈춥니다.`);
+    }
+    const back = await Core.waitFor(() => (currentPage()?.getAttribute('aria-label') === 'page 1' ? true : null), 5000, 200, shouldCancel);
+    if (!back) throw new Error(`"${purpose}" 검색 중 1페이지로 돌아간 것을 확인하지 못했습니다 - 진행하지 않고 멈춥니다.`);
+    return true;
+  };
+  // 창 안에서 글자가 정확히 text인 활성 버튼이 정확히 1개일 때만 준다.
+  Core.findOnlyButtonIn = function (root, text) {
+    if (!root || typeof root.querySelectorAll !== 'function') return null;
+    const buttons = [...root.querySelectorAll('button')].filter((b) => b.textContent.trim() === text &&
+      !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+    return buttons.length === 1 ? buttons[0] : null;
+  };
+  // 창 문구 "<이름>을/를 사용하시겠습니까?"의 이름이 itemName(또는 귀속본)과 정확히 같은지. 문구 요소는 창 안에서
+  // 글자가 "…사용하시겠습니까"로 끝나는 가장 작은 요소다(게임 공용 확인창 ff / ItemUseDialog의 <strong>이름</strong>을 사용…).
+  Core.dialogAsksToUse = function (dialog, itemName) {
+    if (!dialog || typeof dialog.querySelectorAll !== 'function') return false;
+    const pattern = /^(.+?)\s*(?:을|를|을\(를\))\s*사용하시겠습니까\??$/;
+    return [...dialog.querySelectorAll('*')].some((el) => {
+      const text = Core.normalizeItemName(el.textContent);
+      const match = pattern.exec(text);
+      return !!match && Core.sameItemName(match[1], itemName);
+    });
+  };
+
   Core.waitFor = async function (fn, timeoutMs = 15000, intervalMs = 300, shouldCancel = Core.defaultShouldCancel) {
     const startedAt = Date.now();
     const maxThrottleAllowance = Math.min(Math.max(timeoutMs, 0), 30000);
@@ -348,6 +492,14 @@
     }, timeoutMs, 300);
   };
 
+  // 2026-11-17 게임 업데이트(번들 index-BJuRD5zJ.js 공용 확인창 `ff`): 창이 열린 시각을 적어 두고
+  // 마우스 확인 클릭이 열린 뒤 300ms 안이면 버린다(키보드는 예외). 창은 그대로 남고 다음 단계가
+  // 모두 막혔다(11/18 13:14 라시에 거래소, 17:07 미나·17:24 라시에 보스 포기). 확인창 안의 버튼은
+  // 누르기 전에 그 창이 보인 뒤(=클릭 함수가 불린 뒤) 이만큼 지나게 한다. 거래소 수정(r2)과 같은 0.7초.
+  Core.DIALOG_CONFIRM_SETTLE_MS = 700;
+  Core.isInsideDialog = (el) => !!(el && typeof el.closest === 'function' &&
+    el.closest('[role="dialog"], [role="presentation"]'));
+
   Core.safeClick = async function (
     target,
     {
@@ -360,17 +512,21 @@
       afterTimeout = 8000,
     } = {}
   ) {
+    const startedAt = Date.now();
     if (shouldCancel && shouldCancel()) return false;
     await Core.humanDelay(beforeMin, beforeMax);
     if (shouldCancel && shouldCancel()) return false;
-    const el = Core.resolveClickable(target);
-    if (
-      !el ||
-      !el.isConnected ||
-      el.disabled ||
-      el.getAttribute('aria-disabled') === 'true' ||
-      !Core.isElementVisible(el)
-    ) return false;
+    const usable = (candidate) => !!candidate && candidate.isConnected && !candidate.disabled &&
+      candidate.getAttribute('aria-disabled') !== 'true' && Core.isElementVisible(candidate);
+    let el = Core.resolveClickable(target);
+    if (!usable(el)) return false;
+    const settleLeft = Core.isInsideDialog(el) ? Core.DIALOG_CONFIRM_SETTLE_MS - (Date.now() - startedAt) : 0;
+    if (settleLeft > 0) {
+      await Core.sleep(settleLeft);
+      if (shouldCancel && shouldCancel()) return false;
+      el = Core.resolveClickable(target);   // 기다리는 사이 다시 그려졌을 수 있다: 누르는 순간 다시 찾는다
+      if (!usable(el)) return false;
+    }
     el.click();
     if (afterMax > 0) await Core.humanDelay(afterMin, afterMax);
     if (afterCheck) {
@@ -545,6 +701,11 @@
   };
 
   // ---------------- 공용 프리셋 적용 (던전·자동사냥·심층던전 공용) ----------------
+  // 서버 전체 소식 문구(게임 기록 details: "{user}는 …를 조합하는 데에 실패했다.", "…를 획득했다!")인지.
+  // 게임 UI 알림은 "…습니다" 꼴이고, 소식은 3인칭 "…했다"로 끝난다(번들 index socket "log" 띠, /api/game/logs).
+  Core.isGameFeedLine = function (text) {
+    return /했다[.!]?$/.test(String(text || '').replace(/\s+/g, ' ').trim());
+  };
   Core.classifyPresetApplyNotice = function (text, presetName, isExplicitNotice = false) {
     const normalized = String(text || '').replace(/\s+/g, ' ').trim();
     if (!normalized) return null;
@@ -634,12 +795,13 @@
 
             for (const candidate of candidates) {
               const text = (candidate.textContent || '').replace(/\s+/g, ' ').trim();
-              // 해시 클래스의 커스텀 토스트는 role/class 표식이 없을 수 있다.
-              // 정확한 프리셋 카드의 적용 버튼을 누른 직후 새로 추가된 짧은
-              // 노드라면 알림으로 취급하되, 페이지 전체처럼 큰 노드는 배제한다.
-              const isExplicitNotice =
-                explicitNotices.includes(candidate) ||
-                (candidate === el && text.length > 0 && text.length <= 300);
+              // ⚠ 2026-11-19(r10): 알림 요소(role/class 표식) 밖의 새 글은 "알림"으로 보지 않는다. 예전에는
+              // 새로 붙은 300자 이하 글이면 알림으로 봐서, 화면 아래 서버 소식 띠(socket "log", 5초 —
+              // 다른 유저의 "…를 조합하는 데에 실패했다.")를 프리셋 거부로 읽었다(10/19 연이·10/31 쫀떡·
+              // 11/18 라시에, 거부 판정 3건 모두). 알림 요소 밖의 글은 프리셋 이름·"프리셋"이 들어 있을 때만
+              // 판정하고(실화면 성공 토스트 "프리셋 '히드라'을(를) 적용했습니다"), 소식 문구("…했다.")는 버린다.
+              const isExplicitNotice = explicitNotices.includes(candidate);
+              if (!isExplicitNotice && Core.isGameFeedLine(text)) continue;
               const verdict = Core.classifyPresetApplyNotice(
                 text,
                 presetName,
@@ -773,7 +935,14 @@
       const shouldBePressed = label === categoryLabel;
       for (let attempt = 0; attempt < 3; attempt++) {
         const btn = Core.findButtonByText(label);
-        if (!btn) break;
+        // ⚠ 2026-11-18: 고를 분류가 화면에 없는데도 "정렬 완료"를 남겨, 필터 없이 목록 첫 행을 썼다(11/18 4명 x 50회).
+        // 고를 분류 버튼이 없으면 필터를 확인하지 못한 것이므로 여기서 멈춘다(끌 분류가 없는 것은 문제없음).
+        if (!btn) {
+          if (shouldBePressed) {
+            throw new Error(`인벤토리 필터 "${label}" 버튼이 화면에 없습니다 - 필터를 확인하지 못해 진행하지 않고 멈춥니다.`);
+          }
+          break;
+        }
         const pressed = btn.getAttribute('aria-pressed') === 'true';
         if (pressed === shouldBePressed) break;
         await Core.humanDelay(300, 600);
@@ -789,6 +958,10 @@
           throw new Error(`인벤토리 필터 "${label}" 상태 변경에 실패했습니다(3회 시도).`);
         }
       }
+    }
+    const selected = Core.findButtonByText(categoryLabel);
+    if (!selected || selected.getAttribute('aria-pressed') !== 'true') {
+      throw new Error(`인벤토리 필터 "${categoryLabel}"가 켜진 것을 확인하지 못했습니다 - 진행하지 않고 멈춥니다.`);
     }
     Core.log(moduleId, `인벤토리 필터를 "${categoryLabel}"만 켜진 상태로 정렬 완료`);
   };
@@ -922,8 +1095,14 @@
       // 상자를 쓰고 나면 게임이 인벤토리 목록을 다시 그려서, 미리 잡아 둔 버튼은 클릭 직전
       // 대기(0.5~0.9초) 사이에 화면에서 떨어져 나갔다(2026-10-07 수면양말: 88개 남은 활성 행에서
       // 클릭 실패). 클릭 순간에 사용 가능한 행의 버튼을 다시 찾는다.
+      // 실제로 누른 행의 이름(확인창 이름과 정확히 대조한다).
+      // 보유 수량은 확인창이 열리기 전에 읽는다(열린 창은 뒤 목록을 aria-hidden으로 가린다).
+      let pressedRowName = null;
+      let countBefore = null;
       const currentUseButton = () => {
         const fresh = findUsableRow();
+        pressedRowName = fresh ? rewardBoxNameOf(fresh) : null;
+        countBefore = fresh ? Core.visibleItemCount(pressedRowName) : null;
         return fresh ? useButtonOf(fresh, true) : null;
       };
       // 2026-11-09 이라: 6개를 2~3초 간격으로 연속 사용한 직후, 클릭 순간에 활성 행이 없어 실패했다(행 "허무의
@@ -958,12 +1137,23 @@
       // 실패했다(모달이 화면을 덮고 있었기 때문). 수량 입력은 절대 건드리지
       // 않고 기본값(보유 수량 전체) 그대로 확정한다.
       // 확인창 문구의 아이템 이름(<strong>)도 보상 상자인지 대조한다. 다르면 취소하고 멈춘다(누르지 않음).
+      // 2026-11-18(r9): 이름(<strong>)을 못 읽으면 확인하지 못한 것이므로 누르지 않는다. 이름은 방금 누른 행의
+      // 이름과 정확히 같아야 한다(귀속 표시만 다른 것은 같은 상자).
       const shownName = typeof dialog.querySelector === 'function' && dialog.querySelector('strong')
         ? String(dialog.querySelector('strong').textContent || '').trim() : null;
-      if (shownName !== null && !isRewardBoxName(shownName)) {
+      if (shownName === null || !isRewardBoxName(shownName) || !Core.sameItemName(shownName, pressedRowName)) {
         const cancelBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
         if (cancelBtn) await Core.safeClick(() => cancelBtn, { beforeMin: 300, beforeMax: 600, shouldCancel });
-        throw new Error(`보상 상자 확인창의 아이템이 보상 상자가 아닙니다("${shownName.slice(0, 40)}") - 사용하지 않고 멈춥니다.`);
+        throw new Error(shownName === null
+          ? '보상 상자 확인창에서 아이템 이름을 읽지 못했습니다 - 사용하지 않고 멈춥니다.'
+          : `보상 상자 확인창의 아이템("${shownName.slice(0, 40)}")이 누른 행("${String(pressedRowName || '').slice(0, 40)}")과 다릅니다 - 사용하지 않고 멈춥니다.`);
+      }
+      // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨"): 수량 칸 값을 읽지 못하면 누르지 않는다.
+      const quantity = Core.dialogQuantity(dialog);
+      if (quantity === null) {
+        const cancelBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+        if (cancelBtn) await Core.safeClick(() => cancelBtn, { beforeMin: 300, beforeMax: 600, shouldCancel });
+        throw new Error(`보상 상자("${shownName.slice(0, 40)}") 확인창의 수량을 읽지 못했습니다 - 사용하지 않고 멈춥니다.`);
       }
       const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용');
       if (!confirmBtn) throw new Error('보상 상자 사용 확인 버튼을 찾지 못했습니다.');
@@ -973,6 +1163,10 @@
       }
       used++;
       Core.log(moduleId, `보상 상자 사용 ${used}개째 완료: ${(shownName || rewardBoxNameOf(row)).slice(0, 40)}`);
+      Core.logItemAction(moduleId, {
+        stage: '보상 상자', item: shownName, quantity, before: countBefore,
+        after: await Core.readItemCountAfter(shownName, countBefore, shouldCancel),
+      });
 
       // ⚠ 상자를 하나 쓰면 그 종류가 목록에서 통째로 사라지거나 수량이
       // 바뀌면서 페이지 구성이 흔들릴 수 있다. 안전하게 1페이지로 되돌아가
@@ -1021,25 +1215,30 @@
     if (!(await Core.safeClick(consumableTab, { beforeMin: 600, beforeMax: 1100, afterMin: 700, afterMax: 1300 }))) {
       throw new Error('소모품 탭을 열지 못했습니다.');
     }
-    // 목록이 그려지기 전에 읽으면 돌이 있어도 "없음"으로 보고 상점에서 다시 샀다
-    // (2026-10-07 렌더링 감사). 소모품 행이 보일 때까지 기다린다.
+    // 2026-11-18(r9): 분류 "전체"를 먼저 확인한다(다른 분류에 머물러 있으면 목록이 비어 보일 수 있다). 그다음 목록이
+    // 그려졌는지(2026-10-07 렌더링 감사: 그리기 전에 읽어 "없음"으로 다시 샀다), 1페이지인지 확인한다. 하나라도
+    // 확인하지 못하면 "없음"으로 보고 상점에서 사지 않는다. 멈춘다.
+    await Core.ensureConsumableCategoryAll(stoneName);
     const inventoryRendered = await Core.waitFor(() => (
       Core.gameElements('tr').some((tr) => tr.querySelector('td') && Core.isElementVisible(tr)) ? true : null
     ), 6000, 200);
-    if (!inventoryRendered) Core.log('core', `⚠ 소모품 목록이 6초 안에 보이지 않음("${stoneName}" 확인)`);
+    if (!inventoryRendered) throw new Error(`소모품 목록이 6초 안에 보이지 않아 "${stoneName}"을 확인하지 못했습니다 - 사지도 쓰지도 않고 멈춥니다.`);
+    await Core.goInventoryFirstPage(stoneName);
 
     let useButton = null;
     for (let page = 1; page <= 20 && !useButton; page++) {
+      // 행 이름(첫 칸, 수량 꼬리 뗌)이 정확히 그 돌인 행만. 포함 일치("거대한 불의 돌" 등)는 쓰지 않는다.
       const row = Core.gameElements('tr').find(
-        (tr) => tr.textContent.includes(stoneName) && Core.isElementVisible(tr)
+        (tr) => Core.sameItemName(Core.inventoryRowItemName(tr), stoneName) && Core.isElementVisible(tr)
       );
       if (row) {
-        useButton =
-          [...row.querySelectorAll('button')].find(
-            (button) =>
-              ['사용', '사용하기'].includes(button.textContent.trim()) &&
-              Core.isElementVisible(button)
-          ) || null;
+        const buttons = [...row.querySelectorAll('button')].filter(
+          (button) =>
+            ['사용', '사용하기'].includes(button.textContent.trim()) &&
+            Core.isElementVisible(button)
+        );
+        if (buttons.length !== 1) throw new Error(`"${stoneName}" 행의 사용 버튼을 하나로 확정하지 못했습니다(누르지 않음).`);
+        useButton = buttons[0];
         break;
       }
       const next = Core.gameElements('button').find(
@@ -1071,18 +1270,28 @@
     }
     if (!useButton) throw new Error(`상점 구매 후에도 인벤토리에서 "${stoneName}"을 찾지 못했습니다.`);
 
+    const countBefore = Core.visibleItemCount(stoneName);   // 확인창이 열리기 전에 읽는다
     if (!(await Core.safeClick(useButton, { beforeMin: 900, beforeMax: 1600 }))) {
       throw new Error(`"${stoneName}" 사용 버튼이 클릭 직전에 사라졌습니다.`);
     }
-    const confirm = await Core.waitFor(
-      () => Core.findButtonInDialog('아이템 사용', '확인') || Core.findButtonInDialog(stoneName, '확인'),
-      6000
-    );
-    if (!confirm) throw new Error(`"${stoneName}" 사용 확인창을 찾지 못했습니다.`);
+    // 2026-11-18(r9): "확인"은 "<그 돌>을 사용하시겠습니까?"라고 묻는 창 안의 버튼만 누른다(게임 공용 확인창: 제목
+    // "아이템 사용", 문구, 취소·확인 — 번들 Inventory/ff 확인). 문서 전체·다른 창의 "확인"은 누르지 않는다.
+    let stoneDialog = null;
+    const confirm = await Core.waitFor(() => {
+      stoneDialog = Core.findItemDialog('', (d) => Core.dialogAsksToUse(d, stoneName));
+      return stoneDialog ? Core.findOnlyButtonIn(stoneDialog, '확인') : null;
+    }, 6000);
+    if (!confirm) throw new Error(`"${stoneName}"을 사용하겠냐고 묻는 확인창을 찾지 못했습니다(누르지 않고 멈춤).`);
+    const quantity = Core.dialogQuantity(stoneDialog);
+    if (quantity === null) throw new Error(`"${stoneName}" 확인창의 수량을 읽지 못했습니다(누르지 않고 멈춤).`);
     if (!(await Core.safeClick(confirm, { beforeMin: 700, beforeMax: 1200, afterMin: 1200, afterMax: 1800 }))) {
       throw new Error(`"${stoneName}" 사용을 확정하지 못했습니다.`);
     }
     Core.log(moduleId, `${stoneName} 1개 사용 완료`);
+    Core.logItemAction(moduleId, {
+      stage: '속성 맞추기', item: stoneName, quantity, before: countBefore,
+      after: await Core.readItemCountAfter(stoneName, countBefore),
+    });
   };
 
   // ⚠ 사용자 요청(2026-08): 속성의 돌이 인벤토리에 없으면 그냥 멈추던 것을,
@@ -1107,6 +1316,7 @@
   window.__lanisSharedGameRules = Object.freeze({
     ELEMENT_TO_TOWN: Object.freeze({ ...Core.ELEMENT_TO_TOWN }),
     classifyPresetApplyNotice: Core.classifyPresetApplyNotice,
+    isGameFeedLine: Core.isGameFeedLine,
   });
 
   Core.readCurrentCharacterName = function () {
@@ -1250,27 +1460,27 @@
 
     let bought = 0;
     for (let i = 0; i < maxCount; i++) {
+      // 2026-11-18(r9): 행은 이름이 정확히 itemName인 행만(포함 일치 금지), 확인창은 그 이름이 적힌 창만 받는다.
       const findRow = () =>
         Core.gameElements('tr').find(
           (tr) =>
-            tr.textContent.includes(itemName) &&
+            Core.rowHasExactItemName(tr, itemName) &&
             [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '구매') &&
             Core.isElementVisible(tr)
         ) || null;
       const row = await Core.waitFor(findRow, 8000, 250);
       if (!row) throw new Error(`상점 "기타" 탭에서 "${itemName}"을 찾지 못했습니다.`);
-      const buyBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+      const buyBtn = Core.findOnlyButtonIn(row, '구매');
+      if (!buyBtn) throw new Error(`"${itemName}" 행의 "구매" 버튼을 하나로 확정하지 못했습니다(누르지 않음).`);
       if (!(await Core.safeClick(() => buyBtn, { beforeMin: 500, beforeMax: 900 }))) {
         throw new Error(`"${itemName}" 구매 버튼 클릭에 실패했습니다.`);
       }
 
-      const dialog = await Core.waitFor(() => {
-        const d = Core.gameElements('[role="dialog"]').find(
-          (el) => el.textContent.includes('아이템 구매 확인') && Core.isElementVisible(el)
-        );
-        return d || null;
-      }, 6000, 250);
-      if (!dialog) throw new Error(`"${itemName}" 구매 확인창을 찾지 못했습니다.`);
+      const dialog = await Core.waitFor(
+        () => Core.findItemDialog('아이템 구매 확인', (d) => Core.rowHasExactItemName(d, itemName)),
+        6000, 250
+      );
+      if (!dialog) throw new Error(`"${itemName}" 이름이 적힌 구매 확인창을 찾지 못했습니다(구매하지 않음).`);
 
       const goldMatch = dialog.textContent.match(/보유\s*골드\s*([\d,]+)\s*G/);
       const costMatch = dialog.textContent.match(/구매\s*비용[\s\S]*?-([\d,]+)\s*G/);
@@ -1287,12 +1497,15 @@
         break;
       }
 
-      const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+      const confirmBtn = Core.findOnlyButtonIn(dialog, '구매');
+      if (!confirmBtn) throw new Error(`"${itemName}" 구매 확인창의 "구매" 버튼을 하나로 확정하지 못했습니다(구매하지 않음).`);
       if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 600, beforeMax: 1100, afterMin: 900, afterMax: 1400 }))) {
         throw new Error(`"${itemName}" 구매를 확정하지 못했습니다.`);
       }
       bought++;
       Core.log(moduleId, `"${itemName}" ${bought}/${maxCount}개 구매 완료`);
+      Core.logItemAction(moduleId, { stage: '포션 보충', action: '구매', item: itemName, quantity: 1,
+        holding: '골드', before: gold, after: gold - cost, extra: `비용 ${Core.formatItemCount(cost)} G(창 표시)` });
     }
     return bought;
   };
@@ -1357,30 +1570,36 @@
       throw new Error('아이템 상점 "기타" 탭 클릭에 실패했습니다.');
     }
 
+    // 2026-11-18(r9): 행은 이름이 정확히 그 돌인 행만, 확정은 "아이템 구매 확인" 창 안에 그 돌 이름이 적힌 창의
+    // "구매" 하나만 누른다. 예전 대안 findButtonInDialog(stoneName, '구매')는 창이 아니라 상점 행 자체에도 맞았다.
     const findRow = () =>
       Core.gameElements('tr').find(
         (tr) =>
-          tr.textContent.includes(stoneName) &&
+          Core.rowHasExactItemName(tr, stoneName) &&
           [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '구매') &&
           Core.isElementVisible(tr)
       ) || null;
     const row = await Core.waitFor(findRow, 8000, 250);
     if (!row) throw new Error(`상점 "기타" 탭에서 "${stoneName}"을 찾지 못했습니다.`);
-    const buyBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+    const buyBtn = Core.findOnlyButtonIn(row, '구매');
+    if (!buyBtn) throw new Error(`"${stoneName}" 행의 "구매" 버튼을 하나로 확정하지 못했습니다(구매하지 않음).`);
     if (!(await Core.safeClick(() => buyBtn, { beforeMin: 500, beforeMax: 900 }))) {
       throw new Error(`"${stoneName}" 구매 버튼 클릭에 실패했습니다.`);
     }
 
-    const confirmBtn = await Core.waitFor(
-      () => Core.findButtonInDialog('아이템 구매 확인', '구매') || Core.findButtonInDialog(stoneName, '구매'),
-      6000,
-      250
-    );
-    if (!confirmBtn) throw new Error(`"${stoneName}" 구매 확인창을 찾지 못했습니다.`);
+    let buyDialog = null;
+    const confirmBtn = await Core.waitFor(() => {
+      buyDialog = Core.findItemDialog('아이템 구매 확인', (d) => Core.rowHasExactItemName(d, stoneName));
+      return buyDialog ? Core.findOnlyButtonIn(buyDialog, '구매') : null;
+    }, 6000, 250);
+    if (!confirmBtn) throw new Error(`"${stoneName}" 이름이 적힌 구매 확인창을 찾지 못했습니다(구매하지 않음).`);
+    const { gold, cost } = Core.readShopDialogGold(buyDialog);
     if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 600, beforeMax: 1100, afterMin: 1000, afterMax: 1600 }))) {
       throw new Error(`"${stoneName}" 구매를 확정하지 못했습니다.`);
     }
     Core.log(moduleId, `${stoneName} 상점에서 구매 완료 (${Core.ELEMENT_TO_TOWN[targetElement]})`);
+    Core.logItemAction(moduleId, { stage: '속성 맞추기', action: '구매', item: stoneName, quantity: 1, holding: '골드',
+      before: gold, after: gold !== null && cost !== null ? gold - cost : null, extra: `비용 ${Core.formatItemCount(cost)} G(창 표시)` });
   };
 
   // ---------------- 장비용 기름 자동 사용 (자동사냥) ----------------
@@ -1417,11 +1636,14 @@
     }
     // 탭만 확인하고 바로 읽으면(이미 선택돼 있으면 대기 없음) 목록이 그려지기 전이라 기름이
     // 0개·없음으로 읽혔다(2026-10-07 렌더링 감사). 소모품 행이 보일 때까지 기다린다.
+    // 2026-11-18(r9): 분류 "전체"를 먼저 확인한 뒤 목록이 그려졌는지 본다. 확인하지 못한 채 "기름 없음"으로 보고
+    // 광산용 기름을 최대 수량으로 조합하던 것을 막는다. 확인하지 못하면 멈춘다.
+    await Core.ensureConsumableCategoryAll(Core.EQUIPMENT_OIL_NAME, shouldCancel);
     const consumableRowsRendered = await Core.waitFor(() => (
       Core.gameElements('tr').some((tr) => tr.querySelector('td') && Core.isElementVisible(tr)) ? true : null
     ), 6000, 200, shouldCancel);
     if (shouldCancel && shouldCancel()) return false;
-    if (!consumableRowsRendered) Core.log('core', '⚠ 소모품 목록이 6초 안에 보이지 않음(장비용 기름 확인)');
+    if (!consumableRowsRendered) throw new Error('소모품 목록이 6초 안에 보이지 않아 장비용 기름을 확인하지 못했습니다 - 진행하지 않고 멈춥니다.');
     return true;
   };
 
@@ -1465,29 +1687,8 @@
     // 인벤토리는 사용자가 마지막으로 보던 페이지를 유지할 수 있다. 현재
     // 페이지부터 뒤쪽만 훑으면 3페이지의 기름을 4페이지에서 시작했을 때
     // 영구히 놓치므로, 매 검색마다 1페이지로 돌아간 뒤 유한 순회한다.
-    const currentPageButton = Core.gameElements('button').find((button) =>
-      /^page\s+\d+$/.test(button.getAttribute('aria-label') || '') &&
-      Core.isElementVisible(button)
-    );
-    if (
-      currentPageButton &&
-      currentPageButton.getAttribute('aria-label') !== 'page 1'
-    ) {
-      const firstPage = Core.gameElements('button').find((button) =>
-        button.getAttribute('aria-label') === 'Go to page 1' &&
-        !button.disabled &&
-        Core.isElementVisible(button)
-      );
-      if (firstPage && !(await Core.safeClick(firstPage, {
-        beforeMin: 450,
-        beforeMax: 800,
-        afterMin: 550,
-        afterMax: 900,
-        shouldCancel,
-      }))) {
-        throw new Error('장비용 기름 검색을 위해 소모품 1페이지로 돌아가지 못했습니다.');
-      }
-    }
+    // 2026-11-18(r9): 1페이지 버튼이 없거나 누른 뒤 1페이지가 된 것을 확인하지 못하면 멈춘다(예전: 버튼이 없으면 그대로 진행).
+    await Core.goInventoryFirstPage(Core.EQUIPMENT_OIL_NAME, shouldCancel);
 
     for (let page = 1; page <= 20; page++) {
       if (shouldCancel && shouldCancel()) return null;
@@ -1738,6 +1939,11 @@
       throw new Error(`장비용 기름 조합 ${maxCount}회 중 ${failures}회 실패했습니다.`);
     }
     Core.log(moduleId, `장비용 기름 부족 복구: 광산용 기름 전용 레시피로 최대 ${acquired}개 제작 완료`);
+    // 재료 줄 "• 광산용 기름: 3개 (전체 N개)"의 N이 누르기 전 보유 수량이다.
+    const miningBefore = Number((materialLines[0].match(/\(전체\s*([\d,]+)개\)/) || [])[1]?.replace(/,/g, ''));
+    Core.logItemAction(moduleId, { stage: '장비 보호(기름) 조합', action: '조합', item: '광산용 기름 → 장비용 기름',
+      quantity: maxCount, holding: '광산용 기름', before: miningBefore,
+      after: Number.isFinite(miningBefore) ? miningBefore - maxCount * 3 : null, extra: `장비용 기름 ${acquired}개 획득(결과 알림)` });
     return acquired;
   };
 
@@ -1750,6 +1956,10 @@
     let target = await Core.findEquipmentOilUseTarget(shouldCancel);
     let count = target ? Core.readEquipmentOilCount(target.row) : 0;
     if (count !== null && count >= requiredCount) return true;
+    // 2026-11-18(r9): 기름 행은 찾았는데 수량을 읽지 못했으면 부족한지 모르는 것이므로 조합하지 않고 멈춘다.
+    if (count === null) {
+      throw new Error('장비용 기름 수량을 읽지 못해 부족한지 확인하지 못했습니다 - 광산용 기름을 조합하지 않고 멈춥니다.');
+    }
 
     Core.log(
       moduleId,
@@ -2056,7 +2266,11 @@
         120,
         shouldCancel
       );
+      let oilQuantity = 1;   // 2차 확인창이 없으면 선택창 "선택"이 1개를 바른다(예전 화면)
       if (secondaryConfirm && secondaryConfirm !== true) {
+        // 2026-11-18(r9): 2차 확인창(아이템 사용 확인)의 수량을 읽지 못하면 누르지 않는다.
+        oilQuantity = Core.dialogQuantity(typeof secondaryConfirm.closest === 'function' ? secondaryConfirm.closest('[role="dialog"]') : null);
+        if (oilQuantity === null) throw new Error(`"${category}" 장비용 기름 확인창의 수량을 읽지 못했습니다(누르지 않고 멈춤).`);
         if (!(await Core.safeClick(
           () => Core.findEquipmentOilSecondaryConfirm(selectionDialog),
           {
@@ -2087,6 +2301,8 @@
       if (!applied) {
         throw new Error(`"${category}" 장비용 기름 사용 후 수량 감소 또는 완료 신호를 확인하지 못했습니다.`);
       }
+      Core.logItemAction(moduleId, { stage: '장비 보호(기름)', item: Core.EQUIPMENT_OIL_NAME, quantity: oilQuantity,
+        before: countBefore, after: Core.readEquipmentOilCount(Core.findEquipmentOilRow()), extra: `${category} 최상단 착용 장비` });
     } finally {
       successObserver.disconnect();
     }
@@ -4299,8 +4515,10 @@
       throw new Error('"소모품" 탭 클릭에 실패했습니다.');
     }
 
+    // 2026-11-18(r9): 행 이름(첫 칸, 수량 꼬리 뗌)이 정확히 "단풍 토큰"인 행만 쓴다(포함 일치 금지).
     const findTokenRow = () => {
-      const rows = Core.gameElements('tr').filter((tr) => tr.textContent.includes('단풍 토큰') && Core.isElementVisible(tr));
+      const rows = Core.gameElements('tr').filter((tr) =>
+        Core.sameItemName(Core.inventoryRowItemName(tr), '단풍 토큰') && Core.isElementVisible(tr));
       if (rows.length > 1) throw new Error(`단풍 토큰 행이 ${rows.length}개입니다.`);
       return rows[0] || null;
     };
@@ -4364,7 +4582,8 @@
 
       // 2026-10-26 live: the confirm now reads "단풍 토큰을 사용하시겠습니까?" (until 10/25 "단풍 토큰을(를) …").
       // The old-only match left the dialog open and the later Daily steps lost the top menu.
-      const isTokenConfirm = (d) => Core.isElementVisible(d) && /단풍 토큰을(?:\(를\))?\s*사용하시겠습니까/.test(d.textContent);
+      // 2026-11-18(r9): 문구의 이름 앞쪽도 고정한다("○○ 단풍 토큰을 …"인 다른 아이템 창은 받지 않음).
+      const isTokenConfirm = (d) => Core.isElementVisible(d) && Core.dialogAsksToUse(d, '단풍 토큰');
       const dialog = await Core.waitFor(
         () => Core.gameElements('[role="dialog"]').find(isTokenConfirm) || null,
         6000,
@@ -4380,6 +4599,9 @@
         throw new Error(`"단풍 토큰" 사용 확인 버튼을 찾지 못했습니다. (버튼: ${labels.join(', ') || '없음'})`);
       }
       if (confirmBtn.disabled) throw new Error('"단풍 토큰" 사용 확인 버튼이 비활성화 상태입니다.');
+      // 2026-11-18(r9): 몇 개가 쓰이는지(수량 칸 값) 읽지 못하면 누르지 않는다.
+      const tokenQuantity = Core.dialogQuantity(dialog);
+      if (tokenQuantity === null) throw new Error('"단풍 토큰" 확인창의 수량을 읽지 못했습니다(누르지 않음).');
       if (!(await Core.safeClick(() => confirmBtn, { beforeMin: 500, beforeMax: 900, afterMin: 900, afterMax: 1400, shouldCancel }))) {
         throw new Error('"단풍 토큰" 사용 클릭 결과를 확인하지 못했습니다. 재클릭하지 않습니다.');
       }
@@ -4394,6 +4616,9 @@
       if (!confirmed) throw new Error('단풍 토큰 사용 후 행 수량 감소 또는 소멸을 확인하지 못했습니다. 재클릭하지 않습니다.');
       usedCycles++;
       Core.log('preseason', `"단풍 토큰" 사용 ${usedCycles}회차 완료`);
+      const afterRow = findTokenRow();
+      Core.logItemAction('preseason', { stage: '가을 이벤트 토큰', item: '단풍 토큰', quantity: tokenQuantity,
+        before: beforeQuantity, after: afterRow ? readTokenQuantity(afterRow) : 0 });
     }
 
     if (usedCycles === 0) {
@@ -8847,6 +9072,22 @@
           250
         );
         if (!dialog) continue;
+        const cancelCraftDialog = async () => {
+          const cancel = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
+          if (cancel) cancel.click();
+          await Core.humanDelay(400, 700);
+        };
+        // 2026-11-18(r9): 창이 고른 레시피의 창인지 "결과물: <이름>" 줄로 확인한다(번들 Blacksmith 조합 확인창 실측).
+        // 다른 결과물의 창이거나 줄을 읽지 못하면 누르지 않고 취소한 뒤, 다음 레시피로 넘어가지 않고 멈춘다.
+        const resultMatches = [...dialog.querySelectorAll('*')].some((el) => {
+          const match = /^결과물\s*:\s*(.+)$/.exec(el.textContent.replace(/\s+/g, ' ').trim());
+          return !!match && match[1].trim() === label;
+        });
+        if (!resultMatches) {
+          await cancelCraftDialog();
+          Core.log('daily', `⚠ 조합 확인창의 결과물이 "${label}"인지 확인하지 못해 조합하지 않고 멈춥니다.`);
+          return 'stop';
+        }
 
         // ⚠ 실전 확인(2026-08): 조합 확인창은 레시피에 따라 두 형식이다.
         //   1) 고정 필요 재료 개수(예: "금의 상자" - 조각 6개, 성공률
@@ -8861,16 +9102,37 @@
         // 라디오가 있으면 재료를 아끼기 위해 가장 낮은 투입량(화면에
         // 나열된 순서상 마지막 옵션, 성공률도 가장 낮음)을 선택한다.
         const radios = [...dialog.querySelectorAll('input[type="radio"]')];
+        let inputLabel = '고정 재료';
         if (radios.length > 0) {
-          radios[radios.length - 1].click();
+          const lowest = radios[radios.length - 1];
+          // 재료가 모자라 가장 낮은 투입량도 고를 수 없으면(비활성) 예전처럼 이 레시피를 취소하고 다음으로 넘어간다.
+          if (lowest.disabled || lowest.getAttribute('aria-disabled') === 'true') {
+            await cancelCraftDialog();
+            continue;
+          }
+          lowest.click();
           await Core.humanDelay(300, 500);
+          // 고른 투입량이 실제로 선택됐는지 확인한다. 활성 라디오를 눌렀는데 안 켜지면 어느 투입량으로 조합될지
+          // 모르므로 누르지 않고 멈춘다.
+          if (!lowest.checked || radios.some((radio) => radio !== lowest && radio.checked)) {
+            await cancelCraftDialog();
+            Core.log('daily', `⚠ "${label}" 조합 투입량 선택을 확인하지 못해 조합하지 않고 멈춥니다.`);
+            return 'stop';
+          }
+          const optionLabel = lowest.closest('label');
+          inputLabel = optionLabel ? optionLabel.textContent.replace(/\s+/g, ' ').trim() : `라디오 ${radios.length}번째`;
         }
 
+        // 공용 확인창 300ms 가드(11/17 게임 업데이트): 창이 보인 뒤 기다렸다가 누른다.
+        await Core.humanDelay(700, 900);
         const confirmBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '조합');
         if (confirmBtn && !confirmBtn.disabled) {
           confirmBtn.click();
           await Core.humanDelay(1000, 1600);
           Core.log('daily', `일일 퀘스트용 아이템 조합 시도 완료: ${label}`);
+          // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨"): 무엇을 어떤 투입량으로 조합했는지 남긴다.
+          Core.logItemAction('daily', { stage: '일일 퀘스트 장인 정신', action: '조합', item: label, quantity: 1,
+            before: null, after: null, extra: `투입 ${inputLabel}` });
           return true;
         }
         const cancelBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '취소');
@@ -8881,7 +9143,9 @@
     };
 
     for (const label of ['금의 상자', '은의 상자', '동의 상자']) {
-      if (await tryCraft(label)) return true;
+      const crafted = await tryCraft(label);
+      if (crafted === 'stop') return false;
+      if (crafted) return true;
     }
 
     // ⚠ 사용자 요청(2026-08): 상자 카테고리에서 전부 실패하면 가죽 카테고리로
@@ -8894,7 +9158,9 @@
 
     if (!(await Core.waitFor(recipeRowsVisible, 6000, 200))) Core.log('daily', '⚠ 조합소 가죽 레시피 목록이 6초 안에 보이지 않음');
     for (const label of ['고급 가죽끈', '가죽끈', '낡은 가죽끈']) {
-      if (await tryCraft(label)) return true;
+      const crafted = await tryCraft(label);
+      if (crafted === 'stop') return false;
+      if (crafted) return true;
     }
 
     Core.log('daily', '상자·가죽 카테고리 모두에서 조합 가능한 재료가 없습니다.');
@@ -11273,8 +11539,12 @@
   };
 
   Modules.rejob.getHiddenRoomMapOption = function (dialog) {
+    // 2026-11-18(r9): 포함 일치("…숨겨진 방의 지도…"가 들어간 다른 지도)로 고르지 않는다. 항목 안에 글자가 정확히
+    // "숨겨진 방의 지도"(뒤에 "x수량"만 허용)인 요소가 있어야 한다. 없으면 null → 누르지 않고 멈춤.
+    const exactName = (el) => Core.sameItemName(Core.normalizeItemName(el.textContent).replace(/\s*[xX×]\s*[\d,]+$/, ''), '숨겨진 방의 지도');
     const candidates = [...dialog.querySelectorAll('*')].filter((el) => {
       if (!el.textContent.includes('숨겨진 방의 지도')) return false;
+      if (!(exactName(el) || [...el.querySelectorAll('*')].some(exactName))) return false;
       return !!el.querySelector('.MuiRadio-root');
     });
     if (candidates.length === 0) return null;
@@ -11365,22 +11635,32 @@
       const radioEl = option.querySelector('.MuiRadio-root');
       radioEl.click();
       await mod.clickDelayWait();
+      // 2026-11-18(r9): 숨겨진 방의 지도 라디오가 실제로 선택됐는지 확인한다. 아니면 어떤 지도가 쓰일지 모르므로 누르지 않는다.
+      const radioInput = option.querySelector('input[type="radio"]');
+      const otherChecked = [...dialog.querySelectorAll('input[type="radio"]')].some((input) => input !== radioInput && input.checked);
+      if (!radioInput || !radioInput.checked || otherChecked) {
+        Core.notifyStopped('rejob', '"숨겨진 방의 지도" 선택을 확인하지 못해 지도를 쓰지 않고 멈춥니다.');
+        return null;
+      }
 
       const useBtn = [...dialog.querySelectorAll('button')].find((b) => b.textContent.trim() === '사용하기');
       if (!useBtn) {
         Core.notifyStopped('rejob', '"사용하기" 버튼을 찾지 못했습니다.');
         return null;
       }
+      const mapCount = (String(option.textContent || '').match(/[xX×]\s*([\d,]+)/) || [])[1];
       useBtn.click();
       await mod.clickDelayWait();
+      // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨")
+      const before = mapCount ? Number(mapCount.replace(/,/g, '')) : null;
+      Core.logItemAction('rejob', { stage: '전직 숨겨진 방', item: '숨겨진 방의 지도', quantity: 1, before,
+        after: null, extra: before !== null ? '보유: 누르기 전 지도 창 표시' : '지도 창에 보유 표시 없음' });
 
       towerBtn = await Core.retryStep('"깨달음의 방" 버튼 찾기', () => mod.findEnlightenmentTowerButton());
       if (towerBtn) break;
 
-      Core.log(
-        'rejob',
-        `"깨달음의 방"이 생성된 것을 확인하지 못했습니다 (시도 ${attempt}/${MAX_GENERATE_ATTEMPTS}) - 처음부터 다시 시도합니다.`
-      );
+      // 2026-11-18(r9): 지도를 쓴 뒤 결과를 확인하지 못했으면 다른 지도를 또 쓰지 않는다(예전: 처음부터 최대 3번 다시 씀).
+      // 지도 창이 아직 열려 있으면(사용이 안 된 경우) 닫고 멈춘다.
       const leftoverDialog = [...document.querySelectorAll('h1, h2, h3')].find(
         (el) => el.textContent.trim() === '지도 아이템 사용하기'
       );
@@ -11392,7 +11672,8 @@
           await mod.clickDelayWait();
         }
       }
-      await Core.sleep(1500);
+      Core.notifyStopped('rejob', `"숨겨진 방의 지도" 사용 뒤 "깨달음의 방" 생성을 확인하지 못했습니다(시도 ${attempt}) - 지도를 더 쓰지 않고 멈춥니다.`);
+      return null;
     }
     if (!towerBtn) {
       Core.notifyStopped('rejob', `"깨달음의 방"이 생성된 것을 확인하지 못했습니다 (${MAX_GENERATE_ATTEMPTS}번 재시도 후에도 실패).`);
@@ -12371,6 +12652,11 @@
       );
       return marker ? marker.closest('[role="dialog"]') || marker.closest('.MuiDialogContent-root') || marker.parentElement : null;
     }, 2500, 250, shouldCancel);
+    // 2026-11-18(r9): 수량 창(번들 ItemUseDialog "<strong>이름</strong>을 사용하시겠습니까?")이 활력의 포션을 묻는지 확인한다.
+    // 다른 아이템이거나 문구를 읽지 못하면 누르지 않는다.
+    if (quantityDialog && !Core.dialogAsksToUse(quantityDialog, '활력의 포션')) {
+      return { ok: false, verified: false, code: 'QUEST_BATTLE_VITALITY_DIALOG_ITEM_UNVERIFIED', before };
+    }
 
     if (quantityDialog && !shouldCancel()) {
       const input = quantityDialog.querySelector('input[type="number"]');
@@ -12379,6 +12665,11 @@
         nativeSetter.call(input, '1');
         input.dispatchEvent(new Event('input', { bubbles: true }));
         await Core.humanDelay(250, 450);
+        // 2026-11-18(r9): 수량이 실제로 1이 됐는지 다시 읽는다(이 계열 창은 보유 수량이 기본값으로 차 있다).
+        // 1이 아니면 몇 개가 쓰일지 모르므로 누르지 않는다.
+        if (Number(input.value) !== 1) {
+          return { ok: false, verified: false, code: 'QUEST_BATTLE_VITALITY_QUANTITY_UNVERIFIED', before };
+        }
       }
       const confirm = () => [...quantityDialog.querySelectorAll('button')]
         .find((button) => button.textContent.trim() === '사용') || null;
@@ -12398,6 +12689,10 @@
     if (after === null || after < 50) {
       return { ok: false, verified: false, code: 'QUEST_BATTLE_VITALITY_RECOVERY_UNVERIFIED', before, after };
     }
+    // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨"): 무엇을 몇 개 썼는지 남긴다(보유 수는 선택창 표시).
+    Core.logItemAction('autohunt', { stage: '퀘스트 전투 활력 보충', item: boundQty > 0 ? '활력의 포션 (귀속)' : '활력의 포션',
+      quantity: 1, before: boundQty > 0 ? boundQty : null, after: null,
+      extra: `선택창 보유 표시 ${(dialog.textContent.match(/보유:\s*[\d,]+개/g) || []).join('/') || '?'} · 행동력 ${before} → ${after}` });
 
     // 수량 확인 뒤에도 원래의 활력 선택 모달이 남을 수 있다. 이 상태로
     // x50을 누르면 모달이 클릭을 가로채므로, 반드시 닫힘을 확인한 뒤 성공한다.
@@ -13122,10 +13417,16 @@
     }
     const added = kind === 'advanced' ? 5000 : count * 1000;
     if (!(findDialog()?.textContent || '').includes(`${added.toLocaleString('en-US')} 증가`)) { await cancel(); fail(`복구 창의 증가량이 ${added}와 다릅니다`); }
+    await Core.humanDelay(700, 900);   // 공용 확인창 300ms 가드(11/17 게임 업데이트)
     const confirm = [...(findDialog()?.querySelectorAll('button') || [])].find((b) => b.textContent.trim() === '확인' && !b.disabled);
     if (!confirm) { await cancel(); fail('복구 확인 버튼이 없습니다'); }
+    const usedCount = kind === 'advanced' ? 1 : count;
+    const held = optionCount(kind);
     confirm.click();
     if (!(await Core.waitFor(() => (findDialog() ? null : true), 8000, 200))) fail('복구 확인 창이 닫히지 않았습니다');
+    // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨"): 무엇을 몇 개 썼는지 남긴다(보유 = 복구 창 표시).
+    Core.logItemAction('autohunt', { stage: '장비 내구도 복구', item: kind === 'advanced' ? '고급 쇠망치' : '쇠망치', quantity: usedCount,
+      before: held, after: held !== null ? held - usedCount : null, extra: `최대 내구도 +${added.toLocaleString('ko-KR')} · 누른 뒤 보유는 계산값` });
     return added;
   };
 
@@ -14055,6 +14356,11 @@
     }
     if (!quantityDialog) await Core.waitForNoOpenDialog();
 
+    // 2026-11-18(r9): 수량 창(번들 ItemUseDialog)이 활력의 포션을 묻는지 확인한다. 아니면 누르지 않고 멈춘다.
+    if (quantityDialog && !Core.dialogAsksToUse(quantityDialog, '활력의 포션')) {
+      Core.notifyStopped('dungeon', '수량 확인 팝업이 활력의 포션을 묻는 창인지 확인하지 못해 사용하지 않고 멈춥니다.');
+      return false;
+    }
     if (quantityDialog) {
       const quantityInput = quantityDialog.querySelector('input[type="number"]');
       let useQty = null;
@@ -14066,9 +14372,20 @@
         nativeSetter.call(quantityInput, useQty);
         quantityInput.dispatchEvent(new Event('input', { bubbles: true }));
         await Core.humanDelay(500, 1300);
+        // 2026-11-18(r9): 넣은 수량이 실제로 들어갔는지 다시 읽는다. 다르면 몇 개가 쓰일지 모르므로 누르지 않고 멈춘다.
+        if (Number(quantityInput.value) !== useQty) {
+          Core.notifyStopped('dungeon', `활력의 포션 수량이 ${useQty}개로 들어간 것을 확인하지 못해 사용하지 않고 멈춥니다(칸 값 ${quantityInput.value}).`);
+          return false;
+        }
       }
       const confirm = () =>
         [...quantityDialog.querySelectorAll('button')].find((button) => button.textContent.trim() === '사용') || null;
+      const usedQuantity = Core.dialogQuantity(quantityDialog);
+      if (usedQuantity === null) {
+        Core.notifyStopped('dungeon', '활력의 포션 수량 창의 수량을 읽지 못해 사용하지 않고 멈춥니다.');
+        return false;
+      }
+      const heldBefore = (quantityDialog.textContent.match(/보유 수량:\s*([\d,]+)개/) || [])[1];
       if (!(await Core.retryStep('던전 포션 수량 확인 버튼 찾기', confirm)) ||
           !(await Core.safeClick(confirm, { beforeMin: 500, beforeMax: 1300 }))) {
         Core.notifyStopped('dungeon', '수량 확인 팝업의 "사용" 버튼을 클릭하지 못했습니다.');
@@ -14077,6 +14394,9 @@
       await Core.waitFor(() => (!quantityDialog.isConnected ? true : null), 5000, 300);
       mod.energyRefillStreak += 1;
       Core.log('dungeon', useQty !== null ? `활력의 포션 ${useQty}개 사용 완료` : '활력의 포션 사용 완료');
+      const held = heldBefore ? Number(heldBefore.replace(/,/g, '')) : null;
+      Core.logItemAction('dungeon', { stage: '던전 입장 행동력 보충', item: '활력의 포션', quantity: usedQuantity,
+        before: held, after: held !== null ? held - usedQuantity : null, extra: held !== null ? '보유: 누르기 전 수량 창 표시, 누른 뒤는 계산값' : '수량 창에 보유 표시 없음' });
     }
 
     const increasedEnergy = await Core.waitFor(() => {
@@ -20468,6 +20788,8 @@
     const closed = await Core.waitFor(() => !this.findDialog('여러 번 수행하기') ? true : null, 12000, 250, () => false);
     if (!closed) throw new Error(`수행 ${count}회 설정창이 닫힌 결과를 확인하지 못해 claim을 미확인 상태로 보존합니다.`);
     const observed = await this.observePostClaimStatus(expected, this.identity, `수행 ${count}회`);
+    Core.logItemAction('trainingdecisions', { stage: '수행 결정(수행)', action: '수행', item: '여러 번 수행하기', quantity: count,
+      holding: '일반 숙련도', before: beforeMastery, after: expected });
     this.verifyClaim(actionKey, { mastery: expected, character: observed.character, className: observed.className });
     this.cycleCount++;
     Core.updateModuleButtons();
@@ -20524,6 +20846,8 @@
     if (!closed) throw new Error(`${type}의 결정 (${job}) 사용 결과가 불명확해 재시도 없이 중지했습니다.`);
     const gone = await Core.waitFor(async () => !(await this.findDecisionRow(type, job, runId, true)) ? true : null, 8000, 300, () => false);
     if (!gone) throw new Error(`${type}의 결정 (${job}) 스택 소진을 확인하지 못해 재시도 없이 중지했습니다.`);
+    // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨"): 무엇을 몇 개 썼는지 한 줄로 남긴다.
+    Core.logItemAction('trainingdecisions', { stage: '수행 결정', item: `${type}의 결정 (${job})`, quantity: count, before: count, after: 0 });
     this.verifyClaim(actionKey, { stack: 'ABSENT' });
     this.cycleCount++;
     Core.updateModuleButtons();
@@ -20594,6 +20918,8 @@
     const closed = await Core.waitFor(() => !this.findDialog('연금술 확인') ? true : null, 12000, 250, () => false);
     if (!closed) throw new Error(`${itemName} (${job}) ${count}개 설정창이 닫힌 결과를 확인하지 못해 claim을 미확인 상태로 보존합니다.`);
     const observed = await this.observePostClaimStatus(expected, this.identity, `${itemName} (${job}) ${count}개 연금`);
+    Core.logItemAction('trainingdecisions', { stage: '수행 결정(연금)', action: '연금', item: `${itemName} (${job})`, quantity: count,
+      holding: '일반 숙련도', before: beforeMastery, after: expected });
     this.verifyClaim(actionKey, { mastery: expected, character: observed.character, className: observed.className });
     this.cycleCount++;
     Core.updateModuleButtons();
@@ -20970,7 +21296,10 @@
     if (!dialog) throw new Error(`"${name}" 사용 버튼 뒤 창을 하나로 확인하지 못했습니다.`);
     const text = this.normalize(dialog.textContent);
     const inputs = [...dialog.querySelectorAll('input')];
-    const asks = new RegExp(`${this.escapeRegExp(name)}\\s*(?:을|를|을\\(를\\))\\s*사용하시겠습니까`).test(text);
+    // 2026-11-18(r9): 이름 앞쪽도 고정한다("거대한 <이름>을 …"인 다른 아이템 창은 받지 않음). 문구 요소가 정확히
+    // "<이름>을 사용하시겠습니까?"이거나, 제목 "아이템 사용 확인" 바로 뒤에 그 문구가 와야 한다.
+    const asks = Core.dialogAsksToUse(dialog, name) ||
+      new RegExp(`아이템 사용 확인\\s*${this.escapeRegExp(name)}\\s*(?:을|를|을\\(를\\))\\s*사용하시겠습니까`).test(text);
     if (!text.includes('아이템 사용 확인') || !asks || inputs.length > 1 || (inputs.length === 1 && inputs[0].type !== 'number')) {
       Core.log(INVENTORY_CLEANUP_MODULE, `⚠ "${name}" 창이 예상과 달라 누르지 않고 닫음(입력칸 ${inputs.map((el) => el.type || '?').join(',') || '없음'}): ${text.slice(0, 120)}`);
       await this.dismissDialog(dialog, shouldCancel);
@@ -21009,6 +21338,8 @@
     if (!(await this.waitStockDrop(name, before, shouldCancel))) {
       throw new Error(`"${name}" 사용 뒤 개수가 줄지 않았습니다(${before}개 그대로, 다시 누르지 않음).`);
     }
+    // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨"): 무엇을 몇 개 썼고 보유가 어떻게 바뀌었는지 한 줄로 남긴다.
+    Core.logItemAction(INVENTORY_CLEANUP_MODULE, { stage: '주간 인벤토리 정리', item: name, quantity: used, before, after: this.pageStock(name) });
     return used;
   };
 
@@ -21064,6 +21395,7 @@
       const row = this.visibleRows().find((tr) => this.rowItemName(tr) === INVENTORY_CLEANUP_BOOK_BOX);
       return row ? this.rowUseButton(row) : null;
     };
+    const boxesBefore = this.pageStock(INVENTORY_CLEANUP_BOOK_BOX);   // 창이 열리기 전에 읽는다
     if (!(await Core.safeClick(fresh, { beforeMin: 450, beforeMax: 850, shouldCancel }))) throw new Error('숙련 교본 상자 사용 버튼을 누르지 못했습니다.');
     const dialog = await Core.waitFor(() => this.findVisibleDialog('숙련 교본 상자에서 획득할'), 6000, 200, shouldCancel);
     if (!dialog) {
@@ -21108,6 +21440,8 @@
     }
     const closed = await Core.waitFor(() => (!dialog.isConnected || !Core.isElementVisible(dialog) ? true : null), 8000, 200, shouldCancel);
     if (!closed) throw new Error('교본 선택 뒤 창이 닫히지 않았습니다(다시 누르지 않음).');
+    Core.logItemAction(INVENTORY_CLEANUP_MODULE, { stage: '주간 인벤토리 정리(교본 받기)', item: INVENTORY_CLEANUP_BOOK_BOX, quantity: count,
+      before: boxesBefore, after: this.pageStock(INVENTORY_CLEANUP_BOOK_BOX), extra: `${label} ${count}개 받음` });
   };
 
   // 2) 숙련 교본 상자 → 주 직업군을 뺀 가장 낮은 직업 교본 → 받은 만큼만 사용.
@@ -21133,6 +21467,9 @@
     }
     const plan = this.planBooks(status.jobMastery, mainJob, boxes);
     const used = {};
+    // 2026-11-18(r9): 받은 교본을 쓸 "책" 칩이 있는지 상자를 열기 **전에** 확인한다. 예전에는 상자를 열어 교본을 받은 뒤에야
+    // "책" 칩이 없어(11/17 새 UI) 멈춰, 교본이 쓰이지 않은 채 남았다. 확인하지 못하면 상자를 열지 않고 멈춘다.
+    if (Object.keys(plan).length) await this.goInventoryCategory('책', shouldCancel);
     for (const [job, total] of Object.entries(plan)) {
       for (let left = total; left > 0;) {
         await this.goInventoryCategory('상자', shouldCancel);
@@ -21244,6 +21581,8 @@
       const confirm = this.dialogButton(dialog, '연금');
       if (!confirm || confirm.disabled) { await this.cancelDialog(dialog, shouldCancel); throw new Error(`"${result}" 연금 확정 버튼이 없거나 비활성입니다(${chunk}개).`); }
       const stillRight = () => (confirm.isConnected && Number(input.value) === chunk ? confirm : null);
+      // 재료 줄 "• <재료> × n개 (전체 N개 …)"를 누르기 전에 남긴다(무엇을 얼마나 썼는지).
+      const materials = (this.normalize(dialog.textContent).match(/•\s*[^•]+?×\s*[\d,]+\s*개\s*\(\s*전체\s*[\d,]+\s*개/g) || []).join(' ');
       if (!(await Core.safeClick(stillRight, { beforeMin: 500, beforeMax: 900, afterMin: 800, afterMax: 1300, shouldCancel }))) {
         await this.cancelDialog(dialog, shouldCancel);
         throw new Error(`"${result}" 연금을 확정하지 못했습니다(개수 변경 또는 버튼 사라짐).`);
@@ -21251,6 +21590,8 @@
       const closed = await Core.waitFor(() => (!dialog.isConnected || !Core.isElementVisible(dialog) ? true : null), 8000, 200, shouldCancel);
       if (!closed) throw new Error(`"${result}" 연금 뒤 창이 닫히지 않았습니다(다시 누르지 않음).`);
       made += chunk;
+      Core.logItemAction(INVENTORY_CLEANUP_MODULE, { stage: '주간 인벤토리 정리(연금)', action: '연금', item: result, quantity: chunk,
+        before: null, after: null, extra: `재료 ${materials || '?'}(누르기 전 창 표시)` });
     }
     return made;
   };
@@ -26035,6 +26376,122 @@
     return null;
   };
 
+  // ⚠ 2026-11-18 사용자 "모르면 안 눌러야지"(r9): 아이템을 쓰거나 사기 전에 이름을 정확히 대조한다. 보스 엔진은 Core에
+  // 접근하지 못하므로 core.js(Core.inventoryRowItemName·sameItemName·findItemDialog·dialogAsksToUse)와 같은 규칙을 둔다.
+  // 인벤토리 행 이름 = 첫 칸 글자에서 🔗와 "x수량" 꼬리를 뗀 것(11/18 새 UI 실화면: "불의 돌x121", "금의 상자").
+  M.normalizeItemName = (text) => String(text || '').replace(/\u{1F517}️?/gu, ' ').replace(/\s+/g, ' ').trim();
+  M.inventoryRowItemName = (tr) => {
+    const first = tr && typeof tr.querySelector === 'function' ? tr.querySelector('td') : null;
+    return first ? M.normalizeItemName(first.textContent).replace(/\s*사용$/, '').replace(/\s*[x×]\s*[\d,]+$/, '').trim() : '';
+  };
+  M.sameItemName = (a, b) => {
+    const base = (value) => M.normalizeItemName(value).replace(/\s*\(귀속\)$/, '').trim();
+    const left = M.normalizeItemName(a);
+    const right = M.normalizeItemName(b);
+    return !!left && !!right && (left === right || base(left) === base(right));
+  };
+  M.hasExactItemNameIn = (root, itemName) => !!root && typeof root.querySelectorAll === 'function' &&
+    [...root.querySelectorAll('*')].some((el) => el.tagName !== 'BUTTON' && !el.closest('button') && M.sameItemName(el.textContent, itemName));
+  M.findItemDialog = (marker, isTarget) => {
+    const dialogs = M.queryAll('[role="dialog"]').filter((d) => M.isVisible(d) &&
+      (!marker || String(d.textContent || '').includes(marker)) && (!isTarget || isTarget(d)));
+    return dialogs.length === 1 ? dialogs[0] : null;
+  };
+  M.findOnlyButtonIn = (root, text) => {
+    if (!root || typeof root.querySelectorAll !== 'function') return null;
+    const buttons = [...root.querySelectorAll('button')].filter((b) => b.textContent.trim() === text &&
+      !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+    return buttons.length === 1 ? buttons[0] : null;
+  };
+  M.dialogAsksToUse = (dialog, itemName) => {
+    if (!dialog || typeof dialog.querySelectorAll !== 'function') return false;
+    const pattern = /^(.+?)\s*(?:을|를|을\(를\))\s*사용하시겠습니까\??$/;
+    return [...dialog.querySelectorAll('*')].some((el) => {
+      const match = pattern.exec(M.normalizeItemName(el.textContent));
+      return !!match && M.sameItemName(match[1], itemName);
+    });
+  };
+  // 소모품 분류가 "전체"인지 확인(필요하면 "전체"를 누름). 확인하지 못하면 "없음" 판단을 믿을 수 없어 멈춘다.
+  M.ensureConsumableCategoryAll = async (purpose) => {
+    const allButton = () => {
+      const group = M.queryAll('[aria-label="소모품 분류"]').find((el) => M.isVisible(el));
+      return group ? [...group.querySelectorAll('button')].find((b) => b.textContent.trim() === '전체') || null : null;
+    };
+    await M.waitFor(() => allButton(), 6000, 200);
+    for (let attempt = 0; attempt <= 3; attempt++) {
+      const btn = allButton();
+      if (!btn) break;
+      if (btn.getAttribute('aria-pressed') === 'true') return true;
+      if (attempt === 3) break;
+      await M.humanPause(300, 600);
+      M.throwIfStopped();
+      // MUI ToggleButton은 el.click()에 반응하지 않을 때가 있다(core.js Core.dispatchRealClick 실전 주석). 같은 순서로 보낸다.
+      const rect = btn.getBoundingClientRect();
+      const opts = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+      btn.dispatchEvent(new MouseEvent('mousedown', opts));
+      btn.dispatchEvent(new PointerEvent('pointerup', opts));
+      btn.dispatchEvent(new MouseEvent('mouseup', opts));
+      btn.dispatchEvent(new MouseEvent('click', opts));
+      await M.humanPause(400, 700);
+    }
+    throw new Error(`소모품 분류 "전체"가 켜진 것을 확인하지 못했습니다("${purpose}" 확인) - 진행하지 않고 멈춥니다.`);
+  };
+  // 1페이지로 돌아가고 정말 1페이지가 됐는지 다시 읽는다(Core.goInventoryFirstPage와 같은 규칙). 못 하면 멈춘다.
+  M.goInventoryFirstPage = async (purpose) => {
+    const currentPage = () => M.queryAll('button').find((b) => /^page\s+\d+$/.test(b.getAttribute('aria-label') || '') && M.isVisible(b)) || null;
+    const now = currentPage();
+    if (!now || now.getAttribute('aria-label') === 'page 1') return true;
+    const first = M.queryAll('button').find((b) => b.getAttribute('aria-label') === 'Go to page 1' && !b.disabled && M.isVisible(b));
+    if (!first) throw new Error(`"${purpose}" 검색을 위해 소모품 1페이지로 돌아가지 못했습니다 - 진행하지 않고 멈춥니다.`);
+    await M.humanPause(450, 800);
+    M.throwIfStopped();
+    first.click();
+    const back = await M.waitFor(() => (currentPage()?.getAttribute('aria-label') === 'page 1' ? true : null), 5000, 200);
+    if (!back) throw new Error(`"${purpose}" 검색 중 1페이지로 돌아간 것을 확인하지 못했습니다 - 진행하지 않고 멈춥니다.`);
+    return true;
+  };
+  // 인벤토리 행 보유 수량(둘째 칸 또는 첫 칸 꼬리 x수량)과, 지금 화면에서 그 이름 행들의 보유 합(core.js와 같은 규칙).
+  M.inventoryRowCount = (tr) => {
+    const cells = tr && typeof tr.querySelectorAll === 'function' ? [...tr.querySelectorAll('td')] : [];
+    const second = M.normalizeItemName(cells[1] ? cells[1].textContent : '');
+    const match = second.match(/^x?\s*([\d,]+)\s*개?$/) || M.normalizeItemName(cells[0] ? cells[0].textContent : '').match(/[xX×]\s*([\d,]+)$/);
+    return match ? Number(match[1].replace(/,/g, '')) : null;
+  };
+  M.visibleItemCount = (itemName) => {
+    const rows = M.queryAll('tr').filter((tr) => typeof tr.querySelector === 'function' && tr.querySelector('td') && M.isVisible(tr));
+    if (!rows.length) return null;
+    let total = 0;
+    for (const tr of rows) {
+      if (!M.sameItemName(M.inventoryRowItemName(tr), itemName)) continue;
+      const count = M.inventoryRowCount(tr);
+      if (count === null) return null;
+      total += count;
+    }
+    return total;
+  };
+  // ⚠ 2026-11-18 사용자 "뭘 사용했는지 왜 로그에 안 남겨": 확정 버튼을 누를 때마다 이름·수량·보유 전후·단계를 남긴다.
+  M.logItemAction = ({ stage, action = '사용', item, quantity, before, after, holding = '보유', extra } = {}) => {
+    const f = (v) => (Number.isFinite(v) ? Number(v).toLocaleString('ko-KR') : '?');
+    if (M.uiLog) M.uiLog(`🧾 아이템 ${action} · 단계 ${stage || '?'} · ${item || '?'} · 수량 ${f(quantity)} · ${holding} ${f(before)} → ${f(after)}${extra ? ` · ${extra}` : ''}`);
+  };
+
+  // 2026-11-17 게임 업데이트(번들 index-BJuRD5zJ.js 공용 확인창 `ff`): 창이 열린 뒤 300ms 안의 마우스
+  // 확인 클릭은 버려진다. 11/18 17:07 미나·17:24 라시에: "도전 포기" 확인을 창이 보이자마자 눌러 창이
+  // 남았고("보스 포기 후 목록 복귀 실패") 뒤 단계가 모두 "캐릭 버튼을 찾을 수 없음"으로 실패했다.
+  // 확인 버튼은 처음 보인 뒤 settleMs가 지나 다시 찾아 한 번만 누른다(그 사이 사라지면 누르지 않음).
+  M.DIALOG_CONFIRM_SETTLE_MS = 700;
+  M.clickConfirmSettled = async (find, { settleMs = M.DIALOG_CONFIRM_SETTLE_MS, alreadyWaitedMs = 0 } = {}) => {
+    if (!find()) return false;
+    const left = settleMs - alreadyWaitedMs;
+    if (left > 0) await M.sleep(left);
+    M.throwIfStopped();
+    const fresh = find();
+    if (!fresh || fresh.disabled || (fresh.getAttribute && fresh.getAttribute('aria-disabled') === 'true')) return false;
+    fresh.click();
+    return true;
+  };
+
   // 보스 진입이 실패했을 때 "왜" 실패했는지 로그만 보고 알 수 있게 현재 화면
   // 상태를 요약한다. 기존에는 "전투 화면 진입 확인 실패" 한 줄만 남아서, 확인
   // 모달을 못 눌러서 실패한 건지 / 눌렀는데 렌더가 늦은 건지 구분이 불가능했다.
@@ -26485,9 +26942,12 @@
 
             for (const candidate of candidates) {
               const text = (candidate.textContent || '').replace(/\s+/g, ' ').trim();
-              const isExplicitNotice =
-                explicitNotices.includes(candidate) ||
-                (candidate === el && text.length > 0 && text.length <= 300);
+              // ⚠ 2026-11-19(r10): 알림 요소(role/class 표식) 밖의 새 글은 "알림"으로 보지 않는다. 예전에는 새로
+              // 붙은 300자 이하 글이면 알림으로 봐서, 화면 아래 서버 소식 띠(다른 유저 "…를 조합하는 데에
+              // 실패했다.")를 프리셋 거부로 읽고 보스 공략을 중단했다(10/19 연이·11/18 라시에). 알림 요소 밖의 글은
+              // 프리셋 이름·"프리셋"이 들어 있을 때만 판정하고, 소식 문구("…했다.")는 버린다(core.js와 같은 규칙).
+              const isExplicitNotice = explicitNotices.includes(candidate);
+              if (!isExplicitNotice && M.isGameFeedLine(text)) continue;
               const verdict = M.classifyPresetApplyNotice(
                 text,
                 name,
@@ -26620,8 +27080,7 @@
         M.uiLog(`   실패 결과창 화면: ${screen}`);
       }
       // 실패 결과창은 확인으로 닫는다(전투는 이미 끝남). 보상은 목록 단계에서 수령된다.
-      const confirm = M.findBossFailureDialogConfirm();
-      if (confirm) confirm.click();
+      await M.clickConfirmSettled(() => M.findBossFailureDialogConfirm());
       await M.waitFor(() => (M.findBossFailureDialogConfirm() ? null : true), 5000, 200);
       if (M.uiLog) M.uiLog(`⚠ ${actionLabel} 뒤 "도전 실패" 결과창 확인 - 전투 종료(미처치)`);
       const error = new Error('보스 도전 실패로 전투가 끝났습니다(결과창 닫음).');
@@ -26655,7 +27114,7 @@
     const startBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['전투 시작']));
     if (!startBtn) throw new Error('전투 시작 확인 버튼(모달 내) 못찾음');
     // 클릭 직전 재검색: 모달이 그 사이 다시 그려졌을 수 있음
-    await M.sleep(M.rand(100, 300));
+    await M.sleep(M.DIALOG_CONFIRM_SETTLE_MS + M.rand(0, 200));   // 공용 확인창 300ms 가드(11/17)
     M.throwIfStopped();
     const freshStart = M.findConfirmInOpenDialog(['전투 시작']) || startBtn;
     freshStart.click();
@@ -26672,7 +27131,7 @@
     btn.click();
     const startBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']));
     if (!startBtn) throw new Error('회복 확인 버튼(모달 내) 못찾음');
-    await M.sleep(M.rand(100, 300));
+    await M.sleep(M.DIALOG_CONFIRM_SETTLE_MS + M.rand(0, 200));   // 공용 확인창 300ms 가드(11/17)
     M.throwIfStopped();
     const freshStart = M.findConfirmInOpenDialog(['회복', '전투 시작', '회복 시작']) || startBtn;
     freshStart.click();
@@ -26813,9 +27272,12 @@
     const confirmPattern = /^\d+개 스크롤 사용$/;
     const confirmBtn = await M.waitFor(() => M.findConfirmByPatternInOpenDialog(confirmPattern));
     if (!confirmBtn) throw new Error('스크롤 확정 버튼(모달 내) 못찾음');
-    await M.sleep(M.rand(100, 300));
+    await M.sleep(M.DIALOG_CONFIRM_SETTLE_MS + M.rand(0, 200));   // 공용 확인창 300ms 가드(11/17)
     M.throwIfStopped();
-    const freshConfirm = M.findConfirmByPatternInOpenDialog(confirmPattern) || confirmBtn;
+    // 2026-11-18(r9): 다시 찾지 못하면 예전 노드(|| confirmBtn)를 누르지 않고 멈춘다.
+    const freshConfirm = M.findConfirmByPatternInOpenDialog(confirmPattern);
+    if (!freshConfirm) throw new Error('스크롤 확정 버튼이 누르기 직전에 사라졌습니다(누르지 않음).');
+    const confirmText = freshConfirm.textContent.trim();
     freshConfirm.click();
     const applied = await M.waitFor(() => {
       if (M.findConfirmByPatternInOpenDialog(confirmPattern)) return null;
@@ -26829,6 +27291,9 @@
         '중복 사용 없이 중단합니다.'
       );
     }
+    // 2026-11-18(r9, 사용자 "뭘 사용했는지 왜 로그에 안 남겨"): 어떤 스크롤을 몇 개 썼는지 남긴다(보유 = 전투 스크롤 사용 수).
+    M.logItemAction({ stage: '보스 전투 스크롤', item: names.map((name) => `스크롤:${name}`).join('+'), quantity: newlySelected,
+      holding: '전투 사용 수', before: beforeUsage.used, after: applied.used, extra: `확정 버튼 "${confirmText}"` });
     return { ...applied, newlySelected };
   };
 
@@ -27059,7 +27524,7 @@
     const ready = await M.waitFor(findReadyConfirm, 8000, 150);
     M.throwIfStopped();
     if (!ready) throw M.bossClearReadinessFailure('보스 클리어 확인 버튼 준비를 확인하지 못했습니다.');
-    await M.sleep(350);
+    await M.sleep(M.DIALOG_CONFIRM_SETTLE_MS);   // 공용 확인창 300ms 가드(11/17)
     // React can replace the button during the human pause. Never click the
     // retained node: reread the same exact clear dialog immediately before use.
     await M.waitFor(findReadyConfirm, 8000, 150);
@@ -27306,7 +27771,7 @@
     }, 2500, 100);
     if (firstOutcome?.confirm) {
       M.throwIfStopped();
-      firstOutcome.confirm.click();
+      await M.clickConfirmSettled(() => M.findConfirmInOpenDialog(['재도전']));
     }
     const afterTurn = firstOutcome?.reset || await M.waitFor(() => {
       const shown = M.readDisplayedBattleTurn();
@@ -27328,7 +27793,9 @@
     await M.sleep(M.rand(500, 900));
     const confirmBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['포기']), 5000);
     if (!confirmBtn) throw new Error('"도전 포기" 확인 버튼을 찾지 못했습니다.');
-    confirmBtn.click();
+    if (!(await M.clickConfirmSettled(() => M.findConfirmInOpenDialog(['포기'])))) {
+      throw new Error('"도전 포기" 확인 버튼이 누르기 직전에 사라졌습니다.');
+    }
     const returned = await M.waitFor(
       () => location.pathname.replace(/\/$/, '') === '/personal-boss',
       8000,
@@ -27977,8 +28444,14 @@
     if (!battleBtn) throw new Error('"전투" 메뉴 버튼 못찾음');
     M.throwIfStopped();
     battleBtn.click();
+    // 2026-11-18 앙마 18:11:57: 보상 상자 단계(r6)가 인벤토리 2단 필터 "상자"를 켜 두면 소분류 버튼 "보스"가
+    // 화면에 남는다. 페이지 전체의 첫 "보스" 글자를 누르면 그 버튼을 눌러 /inventory에 머물렀다("개인 보스 목록
+    // 복귀 실패"). Core.clickNavMenuExact처럼 열린 메뉴 항목([role="menuitem"]) 안에서만 찾는다.
     const bossItem = await M.waitFor(
-      () => M.queryAll('*').find((el) => el.children.length === 0 && el.textContent.trim() === '보스'),
+      () => M.queryAll('[role="menuitem"]').find((item) => M.isVisible(item) && (
+        item.textContent.trim() === '보스' ||
+        [...item.querySelectorAll('*')].some((el) => el.children.length === 0 && el.textContent.trim() === '보스')
+      )) || null,
       5000
     );
     if (!bossItem) throw new Error('전투 메뉴에서 "보스" 못찾음');
@@ -28010,11 +28483,13 @@
   if (
     !sharedGameRules ||
     typeof sharedGameRules.classifyPresetApplyNotice !== 'function' ||
+    typeof sharedGameRules.isGameFeedLine !== 'function' ||
     !sharedGameRules.ELEMENT_TO_TOWN
   ) {
     throw new Error('공유 게임 규칙 adapter가 로드되지 않았습니다.');
   }
   M.classifyPresetApplyNotice = sharedGameRules.classifyPresetApplyNotice;
+  M.isGameFeedLine = sharedGameRules.isGameFeedLine;
   M.ELEMENT_TO_TOWN = sharedGameRules.ELEMENT_TO_TOWN;
 
   M.readCurrentTown = async () => {
@@ -28126,10 +28601,12 @@
     M.throwIfStopped();
     otherTab.click();
 
+    // 2026-11-18(r9): 행은 이름이 정확히 그 돌인 행만(포함 일치 금지), 확정은 "아이템 구매 확인" 창 안에 그 돌 이름이
+    // 적힌 창의 "구매" 하나만 누른다(예전: "구매"가 있는 아무 열린 창).
     const row = await M.waitFor(
       () => M.queryAll('tr').find(
         (tr) =>
-          tr.textContent.includes(stoneName) &&
+          M.hasExactItemNameIn(tr, stoneName) &&
           [...tr.querySelectorAll('button')].some((b) => b.textContent.trim() === '구매') &&
           M.isVisible(tr)
       ) || null,
@@ -28137,18 +28614,31 @@
       250
     );
     if (!row) throw new Error(`상점 "기타" 탭에서 "${stoneName}"을 찾지 못했습니다.`);
-    const buyBtn = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '구매');
+    const buyBtn = M.findOnlyButtonIn(row, '구매');
+    if (!buyBtn) throw new Error(`"${stoneName}" 행의 "구매" 버튼을 하나로 확정하지 못했습니다(구매하지 않음).`);
     await M.humanPause(500, 900);
     M.throwIfStopped();
     buyBtn.click();
 
-    const confirmBtn = await M.waitFor(() => M.findConfirmInOpenDialog(['구매']), 6000);
-    if (!confirmBtn) throw new Error(`"${stoneName}" 구매 확인창을 찾지 못했습니다.`);
+    let buyDialog = null;
+    const findBuyConfirm = () => {
+      buyDialog = M.findItemDialog('아이템 구매 확인', (d) => M.hasExactItemNameIn(d, stoneName));
+      return buyDialog ? M.findOnlyButtonIn(buyDialog, '구매') : null;
+    };
+    const confirmBtn = await M.waitFor(findBuyConfirm, 6000);
+    if (!confirmBtn) throw new Error(`"${stoneName}" 이름이 적힌 구매 확인창을 찾지 못했습니다(구매하지 않음).`);
+    const dialogText = String(buyDialog && buyDialog.textContent || '');
+    const gold = Number(((dialogText.match(/보유\s*골드\s*([\d,]+)\s*G/) || [])[1] || '').replace(/,/g, '')) || null;
+    const cost = Number(((dialogText.match(/구매\s*비용[\s\S]*?-([\d,]+)\s*G/) || [])[1] || '').replace(/,/g, '')) || null;
     await M.humanPause(600, 1100);
     M.throwIfStopped();
-    confirmBtn.click();
+    if (!(await M.clickConfirmSettled(findBuyConfirm))) {
+      throw new Error(`"${stoneName}" 구매 확인 버튼이 누르기 직전에 사라졌습니다(구매하지 않음).`);
+    }
     await M.humanPause(1000, 1600);
     if (M.uiLog) M.uiLog(`${stoneName} 상점에서 구매 완료 (${M.ELEMENT_TO_TOWN[targetElement]})`);
+    M.logItemAction({ stage: '보스 속성 맞추기', action: '구매', item: stoneName, quantity: 1, holding: '골드',
+      before: gold, after: gold !== null && cost !== null ? gold - cost : null, extra: `비용 ${cost !== null ? cost.toLocaleString('ko-KR') : '?'} G(창 표시)` });
   };
 
   M.useElementStone = async (element) => {
@@ -28169,21 +28659,27 @@
       M.throwIfStopped();
       consumableTab.click();
       await M.humanPause(750, 1300);
-      // 소모품 행이 그려지기 전에 읽으면 돌이 있어도 상점에서 다시 샀다(2026-10-07 렌더링 감사).
+      // 2026-11-18(r9): 분류 "전체"를 먼저 확인하고, 목록이 그려졌는지(2026-10-07 렌더링 감사: 그리기 전에 읽어
+      // 다시 샀다), 1페이지인지 확인한다. 하나라도 확인하지 못하면 "없음"으로 보고 사지 않는다. 멈춘다.
+      await M.ensureConsumableCategoryAll(stoneName);
       const inventoryRendered = await M.waitFor(() => (
         M.queryAll('tr').some((tr) => tr.querySelector('td') && M.isVisible(tr)) ? true : null
       ), 6000, 200);
-      if (!inventoryRendered && M.uiLog) M.uiLog(`⚠ 소모품 목록이 6초 안에 보이지 않음("${stoneName}" 확인)`);
+      if (!inventoryRendered) throw new Error(`소모품 목록이 6초 안에 보이지 않아 "${stoneName}"을 확인하지 못했습니다 - 사지도 쓰지도 않고 멈춥니다.`);
+      await M.goInventoryFirstPage(stoneName);
 
       let useButton = null;
       for (let page = 1; page <= 20 && !useButton; page++) {
+        // 행 이름(첫 칸, 수량 꼬리 뗌)이 정확히 그 돌인 행만. 포함 일치는 쓰지 않는다.
         const row = M.queryAll('tr').find((tr) =>
-          tr.textContent.includes(stoneName) && M.isVisible(tr)
+          M.sameItemName(M.inventoryRowItemName(tr), stoneName) && M.isVisible(tr)
         );
         if (row) {
-          useButton = [...row.querySelectorAll('button')].find((button) =>
+          const buttons = [...row.querySelectorAll('button')].filter((button) =>
             ['사용', '사용하기'].includes(button.textContent.trim()) && M.isVisible(button)
-          ) || null;
+          );
+          if (buttons.length !== 1) throw new Error(`"${stoneName}" 행의 사용 버튼을 하나로 확정하지 못했습니다(누르지 않음).`);
+          useButton = buttons[0];
           break;
         }
         const next = M.queryAll('button').find((button) =>
@@ -28214,17 +28710,30 @@
     // 돌 이름과 수량을 확인한 뒤 사용하는 시간.
     await M.humanPause(900, 1600);
     M.throwIfStopped();
+    const countBefore = M.visibleItemCount(stoneName);   // 확인창이 열리기 전에 읽는다(열린 창은 목록을 aria-hidden으로 가림)
     useButton.click();
 
-    const confirm = await M.waitFor(
-      () => M.findConfirmInOpenDialog(['확인']),
-      5000
-    );
-    if (!confirm) throw new Error(`"${stoneName}" 사용 확인 모달 못찾음`);
+    // 2026-11-18(r9): "<그 돌>을 사용하시겠습니까?"라고 묻는 창 안의 "확인" 하나만 누른다(예전: "확인"이 있는 아무 창).
+    let useDialog = null;
+    const findUseConfirm = () => {
+      useDialog = M.findItemDialog('', (d) => M.dialogAsksToUse(d, stoneName));
+      return useDialog ? M.findOnlyButtonIn(useDialog, '확인') : null;
+    };
+    const confirm = await M.waitFor(findUseConfirm, 5000);
+    if (!confirm) throw new Error(`"${stoneName}"을 사용하겠냐고 묻는 확인창을 찾지 못했습니다(누르지 않고 멈춤).`);
+    // 공용 확인창은 1개만 쓴다(수량 칸 없음). 수량 칸이 있으면 몇 개가 쓰일지 모르므로 멈춘다.
+    const numberInputs = useDialog ? [...useDialog.querySelectorAll('input[type="number"]')] : [];
+    const quantity = numberInputs.length === 0 ? 1 : (numberInputs.length === 1 && Number(numberInputs[0].value) > 0 ? Number(numberInputs[0].value) : null);
+    if (quantity === null) throw new Error(`"${stoneName}" 확인창의 수량을 읽지 못했습니다(누르지 않고 멈춤).`);
     await M.humanPause(700, 1200);
     M.throwIfStopped();
-    confirm.click();
+    if (!(await M.clickConfirmSettled(findUseConfirm))) {
+      throw new Error(`"${stoneName}" 사용 확인 버튼이 누르기 직전에 사라졌습니다(누르지 않음).`);
+    }
     await M.humanPause(1200, 1800);
+    let countAfter = null;
+    await M.waitFor(() => { countAfter = M.visibleItemCount(stoneName); return countAfter !== null && countAfter !== countBefore ? true : null; }, 4000, 250);
+    M.logItemAction({ stage: '보스 속성 맞추기', item: stoneName, quantity, before: countBefore, after: countAfter });
   };
 
   // 이미 전투 화면에 들어간 상태에서 매크로를 재개해도 속성 정렬을 생략하지 않는다.
@@ -28402,7 +28911,7 @@
     const abandonConfirm = M.findConfirmInOpenDialog(['포기', '포기하기']);
     if (abandonConfirm) {
       M.throwIfStopped();
-      abandonConfirm.click();
+      await M.clickConfirmSettled(() => M.findConfirmInOpenDialog(['포기', '포기하기']));
       const returned = await M.waitFor(
         () => location.pathname.replace(/\/$/, '') === '/personal-boss',
         8000,
@@ -28438,8 +28947,13 @@
         // 확인 클릭과 동시에 fetch를 잠깐 가로채서 실제 응답 상태코드를
         // 직접 확인한다 - 그래야 진짜 원인(동시 진행 제한)을 정확히 로그로
         // 남기고, 무의미한 재시도 대신 바로 명확한 이유로 실패 처리한다.
-        const startStatus = M.captureNextStartResponseStatus(4000);
-        confirmBtn.click();
+        // 공용 확인창 300ms 가드(11/17): 창이 보인 뒤 기다렸다가 다시 찾아 누른다.
+        await M.sleep(M.DIALOG_CONFIRM_SETTLE_MS);
+        M.throwIfStopped();
+        const freshConfirm = M.findConfirmInOpenDialog(candidates);
+        const startStatus = freshConfirm ? M.captureNextStartResponseStatus(4000) : Promise.resolve(null);
+        if (freshConfirm) freshConfirm.click();
+        else if (M.uiLog) M.uiLog(`   ⚠ 확인 모달이 누르기 직전에 사라짐 - ${M.describeOpenDialogs()}`);
         const status = await startStatus;
         if (status === 400) {
           throw new Error(
@@ -28492,9 +29006,15 @@
       // 정체를 모르는 팝업은 임의로 닫지 않고 사용자가 확인할 시간을 준다.
       const delayedConfirm = M.findConfirmInOpenDialog(['재도전', '도전하기', '도전', '확인']);
       if (delayedConfirm && !delayedConfirm.dataset.lanisBossEntryHandled) {
-        delayedConfirm.dataset.lanisBossEntryHandled = '1';
-        if (M.uiLog) M.uiLog(`   늦게 나타난 확인 모달 "${delayedConfirm.textContent.trim()}" 클릭`);
-        delayedConfirm.click();
+        // 공용 확인창 300ms 가드(11/17): 처음 본 시각을 적고, settle 시간이 지난 뒤에 한 번만 누른다.
+        const seenAt = Number(delayedConfirm.dataset.lanisBossEntrySeenAt || 0);
+        if (!seenAt) {
+          delayedConfirm.dataset.lanisBossEntrySeenAt = String(Date.now());
+        } else if (Date.now() - seenAt >= M.DIALOG_CONFIRM_SETTLE_MS) {
+          delayedConfirm.dataset.lanisBossEntryHandled = '1';
+          if (M.uiLog) M.uiLog(`   늦게 나타난 확인 모달 "${delayedConfirm.textContent.trim()}" 클릭`);
+          delayedConfirm.click();
+        }
       }
 
       await M.sleep(250);
@@ -28523,7 +29043,9 @@
     );
     if (!confirm) throw new Error('도전 포기 확인 모달의 "포기" 버튼을 못찾음');
     M.throwIfStopped();
-    confirm.click();
+    if (!(await M.clickConfirmSettled(() => M.findConfirmInOpenDialog(['포기', '포기하기', '확인'])))) {
+      throw new Error('도전 포기 확인 모달의 "포기" 버튼이 누르기 직전에 사라짐');
+    }
     const returned = await M.waitFor(
       () => location.pathname.replace(/\/$/, '') === '/personal-boss',
       8000,
